@@ -23,19 +23,25 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Brightness4
 import androidx.compose.material.icons.filled.Brightness7
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -43,6 +49,7 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -98,6 +105,8 @@ fun DashboardScreen(
     val isDarkTheme by viewModel.isDarkTheme.collectAsStateWithLifecycle()
     val batterySaverEnabled by viewModel.batterySaverEnabled.collectAsStateWithLifecycle()
     val autoSelectStrategy by viewModel.autoSelectStrategy.collectAsStateWithLifecycle()
+    val allSubscriptions by viewModel.allSubscriptions.collectAsStateWithLifecycle()
+    val activeSubscriptionId by viewModel.activeSubscriptionId.collectAsStateWithLifecycle()
 
     var showJsonDialog by remember { mutableStateOf(false) }
 
@@ -327,7 +336,180 @@ fun DashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // ACTIVE PROXY NODE CARD (Shows exactly which node is connected and from which subscription)
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = AppTheme.colors.surface),
+            border = androidx.compose.foundation.BorderStroke(
+                1.5.dp,
+                if (isConnected) AppTheme.colors.accentMint else AppTheme.colors.accentCyan.copy(alpha = 0.45f)
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onNavigateToServers() }
+                .testTag("active_node_card")
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (isConnected) AppTheme.colors.accentMint else if (isConnecting) AppTheme.colors.accentCyan else AppTheme.colors.textMuted)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isConnected) "پروفایل متصل (ACTIVE)" else "پروفایل انتخابی (SELECTED)",
+                            color = if (isConnected) AppTheme.colors.accentMint else AppTheme.colors.textSecondary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+
+                    // Click to browse or change server
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(AppTheme.colors.surfaceVariant)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "تغییر سرور",
+                            color = AppTheme.colors.accentCyan,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Icon(
+                            imageVector = Icons.Default.ArrowForward,
+                            contentDescription = null,
+                            tint = AppTheme.colors.accentCyan,
+                            modifier = Modifier.size(11.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (selectedServer != null) {
+                    val server = selectedServer!!
+                    val parentSub = allSubscriptions.find { it.id == server.subscriptionId }
+
+                    Text(
+                        text = server.name,
+                        color = AppTheme.colors.textPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // Protocol badge
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(AppTheme.colors.accentCyan.copy(alpha = 0.15f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = server.protocol.uppercase(),
+                                color = AppTheme.colors.accentCyan,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        // Host:Port badge
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(AppTheme.colors.surfaceVariant)
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "${server.server}:${server.port}",
+                                color = AppTheme.colors.textSecondary,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        // Subscription badge
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF229ED9).copy(alpha = 0.12f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = parentSub?.let { "📂 ${it.name}" } ?: "📁 نود دستی",
+                                color = Color(0xFF229ED9),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.weight(1f))
+
+                        // Real Latency display
+                        if (server.lastPingMs > 0) {
+                            val pingColor = when {
+                                server.lastPingMs < 100 -> AppTheme.colors.accentMint
+                                server.lastPingMs < 200 -> AppTheme.colors.accentAmber
+                                else -> AppTheme.colors.accentRuby
+                            }
+                            Text(
+                                text = "${server.lastPingMs} ms",
+                                color = pingColor,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        } else {
+                            Text(
+                                text = "تست نشده",
+                                color = AppTheme.colors.textMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = AppTheme.colors.accentAmber,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "هیچ سروری انتخاب نشده است! برای انتخاب نود کلیک کنید",
+                            color = AppTheme.colors.accentAmber,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
 
         // Mirovex Official Telegram Channel Banner
         Card(
@@ -611,6 +793,112 @@ fun DashboardScreen(
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace
                 )
+
+                if (allSubscriptions.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Subscription Scope Selector (Hiddify style sub-scoped auto switch)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.FilterAlt,
+                                contentDescription = null,
+                                tint = Color(0xFF229ED9),
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "دامنه سوئیچ خودکار:",
+                                color = AppTheme.colors.textSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        // Reset or Active Scope Indicator
+                        if (activeSubscriptionId != null) {
+                            val activeSubName = allSubscriptions.find { it.id == activeSubscriptionId }?.name ?: "ساب انتخاب شده"
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF229ED9).copy(alpha = 0.15f))
+                                    .clickable { viewModel.setActiveSubscriptionFilter(null) }
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "فقط $activeSubName",
+                                    color = Color(0xFF229ED9),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Clear Scope",
+                                    tint = Color(0xFF229ED9),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "همه سرورها",
+                                color = AppTheme.colors.textMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Quick Chips for Subscriptions
+                    androidx.compose.foundation.lazy.LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        item {
+                            val isAll = activeSubscriptionId == null
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isAll) AppTheme.colors.accentCyan.copy(alpha = 0.2f) else AppTheme.colors.surfaceVariant)
+                                    .border(0.75.dp, if (isAll) AppTheme.colors.accentCyan else AppTheme.colors.border, RoundedCornerShape(6.dp))
+                                    .clickable { viewModel.setActiveSubscriptionFilter(null) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "🌐 همه نودها",
+                                    color = if (isAll) AppTheme.colors.accentCyan else AppTheme.colors.textSecondary,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isAll) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+
+                        items(allSubscriptions) { sub ->
+                            val isThis = activeSubscriptionId == sub.id
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isThis) Color(0xFF229ED9).copy(alpha = 0.2f) else AppTheme.colors.surfaceVariant)
+                                    .border(0.75.dp, if (isThis) Color(0xFF229ED9) else AppTheme.colors.border, RoundedCornerShape(6.dp))
+                                    .clickable { viewModel.setActiveSubscriptionFilter(sub.id) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "📂 ${sub.name} (${sub.totalNodes} نود)",
+                                    color = if (isThis) Color(0xFF229ED9) else AppTheme.colors.textSecondary,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isThis) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 

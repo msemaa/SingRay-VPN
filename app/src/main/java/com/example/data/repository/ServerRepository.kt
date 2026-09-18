@@ -120,16 +120,28 @@ class ServerRepository(private val context: Context) {
         return PingEngine.testAllServers(servers, serverDao, onProgress)
     }
 
-    suspend fun autoSelectBestPingServer(): ServerEntity? {
-        val best = serverDao.getBestPingServer()
+    suspend fun autoSelectBestPingServer(subscriptionId: Long? = null): ServerEntity? {
+        val best = if (subscriptionId != null && subscriptionId > 0) {
+            val list = serverDao.getServersBySubscriptionSortedByPing(subscriptionId)
+            list.firstOrNull() ?: serverDao.getServersBySubscriptionSync(subscriptionId).firstOrNull()
+        } else {
+            serverDao.getBestPingServer()
+        }
         if (best != null) {
             serverDao.setSelectedServer(best.id)
         }
         return best
     }
 
-    suspend fun autoSelectByStrategy(strategy: com.example.model.AutoSelectStrategy): ServerEntity? {
-        val servers = serverDao.getAllServersSync()
+    suspend fun autoSelectByStrategy(
+        strategy: com.example.model.AutoSelectStrategy,
+        subscriptionId: Long? = null
+    ): ServerEntity? {
+        val servers = if (subscriptionId != null && subscriptionId > 0) {
+            serverDao.getServersBySubscriptionSync(subscriptionId)
+        } else {
+            serverDao.getAllServersSync()
+        }
         if (servers.isEmpty()) return null
 
         val best = when (strategy) {

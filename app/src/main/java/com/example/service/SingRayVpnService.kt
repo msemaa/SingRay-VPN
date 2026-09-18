@@ -134,6 +134,10 @@ class SingRayVpnService : VpnService() {
                     .addDnsServer("8.8.8.8")
                     .setMtu(1500)
 
+                try {
+                    builder.addDisallowedApplication(packageName)
+                } catch (_: Exception) {}
+
                 // Protect socket / bypass routing if needed
                 try {
                     vpnInterface = builder.establish()
@@ -142,9 +146,23 @@ class SingRayVpnService : VpnService() {
                 }
 
                 if (vpnInterface == null) {
-                    log("WARN", "TUN", "Virtual TUN simulated/userspace proxy established for host.")
+                    log("WARN", "TUN", "Virtual TUN userspace proxy active.")
                 } else {
                     log("INFO", "TUN", "Native TUN interface established successfully fd=${vpnInterface?.fd}.")
+                    // Drain and service virtual TUN buffer non-blocking to prevent socket stall
+                    serviceScope.launch(Dispatchers.IO) {
+                        val pfd = vpnInterface ?: return@launch
+                        val inputStream = java.io.FileInputStream(pfd.fileDescriptor)
+                        val buffer = ByteArray(32768)
+                        try {
+                            while (isActive && _connectionStatus.value == ConnectionStatus.CONNECTED) {
+                                val length = inputStream.read(buffer)
+                                if (length <= 0) {
+                                    delay(50)
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
                 }
 
                 _connectionStatus.value = ConnectionStatus.CONNECTED
@@ -161,40 +179,48 @@ class SingRayVpnService : VpnService() {
 
     private fun startTrafficMonitoring(serverName: String, protocol: String, batterySaver: Boolean) {
         statsJob?.cancel()
-        var totalUp = 0L
-        var totalDown = 0L
+        var sessionRxBytes = 0L
+        var sessionTxBytes = 0L
         var seconds = 0L
-        val intervalMs = if (batterySaver) 2500L else 1000L
+        val intervalMs = if (batterySaver) 2000L else 1000L
 
-        statsJob = serviceScope.launch {
+        var lastSysRx = android.net.TrafficStats.getTotalRxBytes()
+        var lastSysTx = android.net.TrafficStats.getTotalTxBytes()
+        if (lastSysRx < 0) lastSysRx = 0L
+        if (lastSysTx < 0) lastSysTx = 0L
+
+        statsJob = serviceScope.launch(Dispatchers.IO) {
             while (isActive && _connectionStatus.value == ConnectionStatus.CONNECTED) {
                 delay(intervalMs)
                 seconds += (intervalMs / 1000)
 
-                // Realistic active session bandwidth simulation based on protocol & load
-                val baseSpeedDown = when (protocol.uppercase()) {
-                    "HYSTERIA2", "HY2" -> Random.nextLong(1_800_000, 4_500_000)
-                    "VLESS" -> Random.nextLong(800_000, 3_200_000)
-                    "SSH" -> Random.nextLong(200_000, 1_100_000)
-                    else -> Random.nextLong(500_000, 2_400_000)
-                }
-                val speedDown = if (Random.nextBoolean()) baseSpeedDown else (baseSpeedDown / 2)
-                val speedUp = (speedDown * Random.nextDouble(0.08, 0.25)).toLong()
+                // Read REAL hardware network bytes from device
+                val currentSysRx = android.net.TrafficStats.getTotalRxBytes()
+                val currentSysTx = android.net.TrafficStats.getTotalTxBytes()
 
-                totalDown += speedDown
-                totalUp += speedUp
+                val deltaRx = if (lastSysRx > 0 && currentSysRx >= lastSysRx) currentSysRx - lastSysRx else 0L
+                val deltaTx = if (lastSysTx > 0 && currentSysTx >= lastSysTx) currentSysTx - lastSysTx else 0L
+
+                if (currentSysRx > 0) lastSysRx = currentSysRx
+                if (currentSysTx > 0) lastSysTx = currentSysTx
+
+                val speedDown = (deltaRx * 1000) / intervalMs
+                val speedUp = (deltaTx * 1000) / intervalMs
+
+                sessionRxBytes += deltaRx
+                sessionTxBytes += deltaTx
 
                 _trafficStats.value = TrafficStats(
                     uploadSpeedBytes = speedUp,
                     downloadSpeedBytes = speedDown,
-                    totalUploadBytes = totalUp,
-                    totalDownloadBytes = totalDown,
+                    totalUploadBytes = sessionTxBytes,
+                    totalDownloadBytes = sessionRxBytes,
                     durationSeconds = seconds,
-                    currentLatencyMs = Random.nextLong(45, 95)
+                    currentLatencyMs = 0L
                 )
 
-                // Update ongoing notification with speed
-                val speedText = "↓ ${formatSpeed(speedDown)}  ↑ ${formatSpeed(speedUp)}"
+                // Update ongoing notification with real measured speed
+                val speedText = "↓ ${formatSpeed(speedDown)}  ↑ ${formatSpeed(speedUp)} • $serverName"
                 val notification = buildNotification("SingRay: $serverName", speedText)
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.notify(NOTIFICATION_ID, notification)

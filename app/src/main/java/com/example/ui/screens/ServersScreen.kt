@@ -88,6 +88,8 @@ fun ServersScreen(
     val batchPingState by viewModel.batchPingState.collectAsStateWithLifecycle()
     val autoSelectStrategy by viewModel.autoSelectStrategy.collectAsStateWithLifecycle()
     val isDarkTheme by viewModel.isDarkTheme.collectAsStateWithLifecycle()
+    val allSubscriptions by viewModel.allSubscriptions.collectAsStateWithLifecycle()
+    val activeSubscriptionId by viewModel.activeSubscriptionId.collectAsStateWithLifecycle()
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedProtocolFilter by remember { mutableStateOf("ALL") }
@@ -119,6 +121,8 @@ fun ServersScreen(
     }
 
     val filteredServers = allServers.filter { server: ServerEntity ->
+        val matchesSub = activeSubscriptionId == null || server.subscriptionId == activeSubscriptionId
+
         val matchesSearch = searchQuery.isBlank() ||
                 server.name.contains(searchQuery, ignoreCase = true) ||
                 server.server.contains(searchQuery, ignoreCase = true) ||
@@ -135,7 +139,7 @@ fun ServersScreen(
             else -> true
         }
 
-        matchesSearch && matchesProtocol
+        matchesSub && matchesSearch && matchesProtocol
     }
 
     Box(
@@ -322,6 +326,53 @@ fun ServersScreen(
             )
 
             Spacer(modifier = Modifier.height(10.dp))
+
+            if (allSubscriptions.isNotEmpty()) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    item {
+                        val isAll = activeSubscriptionId == null
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isAll) Color(0xFF229ED9).copy(alpha = 0.25f) else AppTheme.colors.surface)
+                                .border(1.dp, if (isAll) Color(0xFF229ED9) else AppTheme.colors.border, RoundedCornerShape(8.dp))
+                                .clickable { viewModel.setActiveSubscriptionFilter(null) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "🌐 همه اشتراک‌ها",
+                                color = if (isAll) Color(0xFF229ED9) else AppTheme.colors.textSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = if (isAll) FontWeight.Bold else FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    items(allSubscriptions) { sub ->
+                        val isThis = activeSubscriptionId == sub.id
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isThis) Color(0xFF229ED9).copy(alpha = 0.25f) else AppTheme.colors.surface)
+                                .border(1.dp, if (isThis) Color(0xFF229ED9) else AppTheme.colors.border, RoundedCornerShape(8.dp))
+                                .clickable { viewModel.setActiveSubscriptionFilter(sub.id) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "📂 ${sub.name} (${sub.totalNodes})",
+                                color = if (isThis) Color(0xFF229ED9) else AppTheme.colors.textSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = if (isThis) FontWeight.Bold else FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+            }
 
             // Protocol Filter Chips
             val protocolChips = listOf("ALL", "VLESS", "HY2", "TROJAN", "SS", "VMESS", "SSH")

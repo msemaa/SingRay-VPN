@@ -33,6 +33,12 @@ interface ServerDao {
     @Query("SELECT * FROM servers WHERE lastPingMs > 0 ORDER BY lastPingMs ASC")
     suspend fun getServersSortedByPing(): List<ServerEntity>
 
+    @Query("SELECT * FROM servers WHERE subscriptionId = :subId ORDER BY isFavorite DESC, id DESC")
+    suspend fun getServersBySubscriptionSync(subId: Long): List<ServerEntity>
+
+    @Query("SELECT * FROM servers WHERE subscriptionId = :subId AND lastPingMs > 0 ORDER BY lastPingMs ASC")
+    suspend fun getServersBySubscriptionSortedByPing(subId: Long): List<ServerEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertServer(server: ServerEntity): Long
 

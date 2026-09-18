@@ -95,6 +95,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _autoSelectStrategy = MutableStateFlow(com.example.model.AutoSelectStrategy.LOWEST_PING)
     val autoSelectStrategy: StateFlow<com.example.model.AutoSelectStrategy> = _autoSelectStrategy.asStateFlow()
 
+    // Filter by Active Subscription (e.g., when a user selects a specific subscription with 10 nodes)
+    private val _activeSubscriptionId = MutableStateFlow<Long?>(null)
+    val activeSubscriptionId: StateFlow<Long?> = _activeSubscriptionId.asStateFlow()
+
     // Startup Telegram Channel Dialog
     private val _showTelegramDialog = MutableStateFlow(false)
     val showTelegramDialog: StateFlow<Boolean> = _showTelegramDialog.asStateFlow()
@@ -133,18 +137,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         applyAutoSelectStrategy(strategy)
     }
 
+    fun setActiveSubscriptionFilter(subId: Long?) {
+        _activeSubscriptionId.value = subId
+        val subName = allSubscriptions.value.find { it.id == subId }?.name ?: "All Nodes"
+        _uiNotice.value = "Scope set to: $subName"
+        SingRayVpnService.log("INFO", "SUBSCRIPTION", "Auto-switch scope locked to subscription: $subName")
+    }
+
     fun applyAutoSelectStrategy(strategy: com.example.model.AutoSelectStrategy = _autoSelectStrategy.value) {
         viewModelScope.launch {
-            val best = repository.autoSelectByStrategy(strategy)
+            val subId = _activeSubscriptionId.value
+            val best = repository.autoSelectByStrategy(strategy, subscriptionId = subId)
             if (best != null) {
-                _uiNotice.value = "Selected (${strategy.persianTitle}): ${best.name}"
+                val subName = allSubscriptions.value.find { it.id == best.subscriptionId }?.name
+                val scopeInfo = if (subName != null) " [$subName]" else ""
+                _uiNotice.value = "Selected (${strategy.persianTitle}): ${best.name}$scopeInfo"
                 SingRayVpnService.log(
                     "INFO",
                     "SMART_ROUTING",
-                    "Auto-selected node based on ${strategy.title}: ${best.name} [${best.protocol.uppercase()}]"
+                    "Auto-selected node based on ${strategy.title}: ${best.name} (${best.lastPingMs}ms) [${best.protocol.uppercase()}]$scopeInfo"
                 )
             } else {
-                _uiNotice.value = "Run ping test first to analyze nodes"
+                _uiNotice.value = "No nodes available in this subscription scope"
             }
         }
     }
@@ -273,10 +287,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun autoSelectLowestPing() {
         viewModelScope.launch {
-            val best = repository.autoSelectBestPingServer()
+            val subId = _activeSubscriptionId.value
+            val best = repository.autoSelectBestPingServer(subscriptionId = subId)
             if (best != null) {
-                _uiNotice.value = "Selected lowest ping: ${best.name} (${best.lastPingMs}ms)"
-                SingRayVpnService.log("INFO", "SMART_ROUTING", "Auto-switched to fastest node: ${best.name} (${best.lastPingMs}ms)")
+                val subName = allSubscriptions.value.find { it.id == best.subscriptionId }?.name
+                val scopeInfo = if (subName != null) " [$subName]" else ""
+                _uiNotice.value = "Selected lowest ping: ${best.name} (${best.lastPingMs}ms)$scopeInfo"
+                SingRayVpnService.log("INFO", "SMART_ROUTING", "Auto-switched to fastest node: ${best.name} (${best.lastPingMs}ms)$scopeInfo")
             } else {
                 _uiNotice.value = "Run ping test first to discover fastest server"
             }
