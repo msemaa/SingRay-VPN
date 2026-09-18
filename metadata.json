@@ -1,0 +1,6 @@
+{
+  "name": "SingRay",
+  "description": "Professional engineering-grade Xray and Sing-box proxy manager supporting VLESS, VMess, Trojan, Shadowsocks, Hysteria2, and SSH with smart ping auto-connect.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Center node shield / tunnel emblem -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M54,28 L74,38 L74,60 C74,72 54,82 54,82 C54,82 34,72 34,60 L34,38 Z" />
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M54,33 L70,41 L70,58 C70,68 54,76 54,76 C54,76 38,68 38,58 L38,41 Z" />
+    <!-- Glowing core lightning / speed routing bolt -->
+    <path
+        android:pathData="M56,38 L44,53 L53,53 L51,70 L64,51 L55,51 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="44"
+                android:startY="38"
+                android:endX="64"
+                android:endY="70"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#00F5D4" />
+                <item android:offset="1.0" android:color="#00B4D8" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Orbiting precision dots -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M28,54 A3,3 0 1,1 28,53.9 Z M80,54 A3,3 0 1,1 80,53.9 Z M54,22 A2.5,2.5 0 1,1 54,21.9 Z" />
+</vector>
