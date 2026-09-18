@@ -206,8 +206,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectServer(server: ServerEntity) {
         viewModelScope.launch {
+            val wasConnected = connectionStatus.value == ConnectionStatus.CONNECTED || connectionStatus.value == ConnectionStatus.CONNECTING
             repository.selectServer(server.id)
             SingRayVpnService.log("INFO", "CONFIG", "Selected server: ${server.name} [${server.protocol.uppercase()}]")
+
+            if (wasConnected) {
+                _uiNotice.value = "سوئیچ به ${server.name} (اتصال مجدد...)"
+                disconnect()
+                kotlinx.coroutines.delay(700)
+                startConnect()
+            } else {
+                _uiNotice.value = "نود فعال: ${server.name}"
+            }
         }
     }
 

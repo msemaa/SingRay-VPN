@@ -33,6 +33,9 @@ class SingRayVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
     private var statsJob: Job? = null
+    private var localProxyServer: com.example.core.LocalProxyServer? = null
+    private val proxyRxAccumulator = java.util.concurrent.atomic.AtomicLong(0)
+    private val proxyTxAccumulator = java.util.concurrent.atomic.AtomicLong(0)
 
     companion object {
         const val ACTION_CONNECT = "com.example.singray.CONNECT"
@@ -167,7 +170,20 @@ class SingRayVpnService : VpnService() {
 
                 _connectionStatus.value = ConnectionStatus.CONNECTED
                 log("INFO", "CORE", "Tunnel established. Outbound: $host:$port ($protocol).")
-                log("INFO", "ROUTE", "Routing mode: $routingMode. Local LAN bypass active.")
+                log("INFO", "ROUTE", "Routing mode: $routingMode (Hiddify architecture).")
+
+                // Start local SOCKS5 inbound proxy (127.0.0.1:10808) for Telegram and system apps
+                try {
+                    localProxyServer?.stop()
+                    localProxyServer = com.example.core.LocalProxyServer(this@SingRayVpnService, 10808) { rx, tx ->
+                        proxyRxAccumulator.addAndGet(rx)
+                        proxyTxAccumulator.addAndGet(tx)
+                    }
+                    localProxyServer?.start()
+                    log("INFO", "INBOUND", "Local SOCKS5 proxy active on 127.0.0.1:10808 (Telegram ready).")
+                } catch (e: Exception) {
+                    log("WARN", "INBOUND", "Local SOCKS5 init notice: ${e.message}")
+                }
 
                 startTrafficMonitoring(serverName, protocol, batterySaver)
             } catch (e: Exception) {
@@ -194,12 +210,18 @@ class SingRayVpnService : VpnService() {
                 delay(intervalMs)
                 seconds += (intervalMs / 1000)
 
-                // Read REAL hardware network bytes from device
+                // Read hardware network bytes + proxy bytes
                 val currentSysRx = android.net.TrafficStats.getTotalRxBytes()
                 val currentSysTx = android.net.TrafficStats.getTotalTxBytes()
 
-                val deltaRx = if (lastSysRx > 0 && currentSysRx >= lastSysRx) currentSysRx - lastSysRx else 0L
-                val deltaTx = if (lastSysTx > 0 && currentSysTx >= lastSysTx) currentSysTx - lastSysTx else 0L
+                val proxyRx = proxyRxAccumulator.getAndSet(0L)
+                val proxyTx = proxyTxAccumulator.getAndSet(0L)
+
+                val sysDeltaRx = if (lastSysRx > 0 && currentSysRx >= lastSysRx) currentSysRx - lastSysRx else 0L
+                val sysDeltaTx = if (lastSysTx > 0 && currentSysTx >= lastSysTx) currentSysTx - lastSysTx else 0L
+
+                val deltaRx = sysDeltaRx + proxyRx
+                val deltaTx = sysDeltaTx + proxyTx
 
                 if (currentSysRx > 0) lastSysRx = currentSysRx
                 if (currentSysTx > 0) lastSysTx = currentSysTx
@@ -233,6 +255,11 @@ class SingRayVpnService : VpnService() {
         log("INFO", "CORE", "Stopping SingRay core...")
 
         statsJob?.cancel()
+        try {
+            localProxyServer?.stop()
+        } catch (_: Exception) {}
+        localProxyServer = null
+
         try {
             vpnInterface?.close()
         } catch (_: Exception) {}
