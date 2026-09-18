@@ -304,32 +304,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun connectOrDisconnect() {
+    fun disconnect() {
         val context = getApplication<Application>()
-        val currentStatus = connectionStatus.value
+        val intent = Intent(context, SingRayVpnService::class.java).apply {
+            action = SingRayVpnService.ACTION_DISCONNECT
+        }
+        context.startService(intent)
+    }
 
-        if (currentStatus == ConnectionStatus.CONNECTED || currentStatus == ConnectionStatus.CONNECTING) {
-            val intent = Intent(context, SingRayVpnService::class.java).apply {
-                action = SingRayVpnService.ACTION_DISCONNECT
-            }
-            context.startService(intent)
+    fun startConnect() {
+        val context = getApplication<Application>()
+        val server = selectedServer.value
+        if (server == null) {
+            _uiNotice.value = "Please select a server first"
+            return
+        }
+
+        val intent = Intent(context, SingRayVpnService::class.java).apply {
+            action = SingRayVpnService.ACTION_CONNECT
+            putExtra(SingRayVpnService.EXTRA_SERVER_NAME, server.name)
+            putExtra(SingRayVpnService.EXTRA_SERVER_HOST, server.server)
+            putExtra(SingRayVpnService.EXTRA_SERVER_PORT, server.port)
+            putExtra(SingRayVpnService.EXTRA_PROTOCOL, server.protocol.uppercase())
+            putExtra(SingRayVpnService.EXTRA_ROUTING_MODE, _routingMode.value.title)
+            putExtra(SingRayVpnService.EXTRA_BATTERY_SAVER, _batterySaverEnabled.value)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
         } else {
-            val server = selectedServer.value
-            if (server == null) {
+            context.startService(intent)
+        }
+    }
+
+    fun toggleConnection(onRequestPermission: (() -> Unit) -> Unit) {
+        val currentStatus = connectionStatus.value
+        if (currentStatus == ConnectionStatus.CONNECTED || currentStatus == ConnectionStatus.CONNECTING) {
+            disconnect()
+        } else {
+            if (selectedServer.value == null) {
                 _uiNotice.value = "Please select a server first"
                 return
             }
-
-            val intent = Intent(context, SingRayVpnService::class.java).apply {
-                action = SingRayVpnService.ACTION_CONNECT
-                putExtra(SingRayVpnService.EXTRA_SERVER_NAME, server.name)
-                putExtra(SingRayVpnService.EXTRA_SERVER_HOST, server.server)
-                putExtra(SingRayVpnService.EXTRA_SERVER_PORT, server.port)
-                putExtra(SingRayVpnService.EXTRA_PROTOCOL, server.protocol.uppercase())
-                putExtra(SingRayVpnService.EXTRA_ROUTING_MODE, _routingMode.value.title)
-                putExtra(SingRayVpnService.EXTRA_BATTERY_SAVER, _batterySaverEnabled.value)
+            onRequestPermission {
+                startConnect()
             }
-            context.startService(intent)
+        }
+    }
+
+    fun connectOrDisconnect() {
+        val currentStatus = connectionStatus.value
+        if (currentStatus == ConnectionStatus.CONNECTED || currentStatus == ConnectionStatus.CONNECTING) {
+            disconnect()
+        } else {
+            startConnect()
         }
     }
 }

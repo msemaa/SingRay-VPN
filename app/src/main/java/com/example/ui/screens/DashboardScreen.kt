@@ -85,7 +85,8 @@ import java.text.DecimalFormat
 fun DashboardScreen(
     viewModel: MainViewModel,
     onNavigateToServers: () -> Unit,
-    onNavigateToRouting: () -> Unit
+    onNavigateToRouting: () -> Unit,
+    onRequestConnect: () -> Unit = { viewModel.connectOrDisconnect() }
 ) {
     val context = LocalContext.current
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
@@ -285,7 +286,7 @@ fun DashboardScreen(
                     .clip(CircleShape)
                     .background(AppTheme.colors.surface)
                     .border(2.5.dp, ringColor, CircleShape)
-                    .clickable { viewModel.connectOrDisconnect() }
+                    .clickable { onRequestConnect() }
                     .testTag("core_power_button")
             ) {
                 Column(

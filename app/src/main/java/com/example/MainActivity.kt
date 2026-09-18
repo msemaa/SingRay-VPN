@@ -200,7 +200,10 @@ fun MainAppContent(
                 0 -> DashboardScreen(
                     viewModel = viewModel,
                     onNavigateToServers = { currentTab = 1 },
-                    onNavigateToRouting = { currentTab = 2 }
+                    onNavigateToRouting = { currentTab = 2 },
+                    onRequestConnect = {
+                        viewModel.toggleConnection(onRequestVpnPermission)
+                    }
                 )
                 1 -> ServersScreen(viewModel = viewModel)
                 2 -> RoutingScreen(viewModel = viewModel)
