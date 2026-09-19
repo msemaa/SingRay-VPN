@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -71,10 +73,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -88,6 +92,45 @@ import com.example.ui.dialogs.TELEGRAM_CHANNEL_URL
 import com.example.ui.dialogs.ViewSingBoxJsonDialog
 import com.example.ui.theme.AppTheme
 import java.text.DecimalFormat
+
+/**
+ * A fixed-size square action used by the dashboard header.
+ *
+ * Deliberately built from Box + clickable instead of IconButton: IconButton
+ * applies `minimumInteractiveComponentSize()` (48dp) on top of whatever size
+ * you pass, so a row of "36dp" IconButtons silently needs 144dp+ and starts
+ * overlapping its neighbours. Here the measured size is exactly [size].
+ */
+@Composable
+private fun HeaderActionButton(
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color,
+    background: Color,
+    borderColor: Color,
+    testTag: String,
+    size: Int = 34,
+    iconSize: Int = 17,
+    onClick: () -> Unit
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(size.dp)
+            .clip(CircleShape)
+            .background(background)
+            .border(1.dp, borderColor, CircleShape)
+            .clickable(onClick = onClick)
+            .testTag(testTag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(iconSize.dp)
+        )
+    }
+}
 
 @Composable
 fun DashboardScreen(
@@ -144,12 +187,17 @@ fun DashboardScreen(
         Spacer(modifier = Modifier.height(14.dp))
 
         // Engineering Top Bar Status
+        //
+        // LAYOUT RULE: the title column takes weight(1f) and truncates, and the
+        // action side is a FIXED number of fixed-size square buttons. Never use
+        // wrapContentWidth() here (it lets the row overflow instead of shrinking,
+        // which is what made these controls overlap) and never put a
+        // variable-length label in this row.
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "SINGRAY",
@@ -157,9 +205,12 @@ fun DashboardScreen(
                         fontSize = 20.sp,
                         fontWeight = FontWeight.ExtraBold,
                         letterSpacing = 1.5.sp,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
@@ -172,21 +223,38 @@ fun DashboardScreen(
                             color = AppTheme.colors.textMuted,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
+                // The routing mode lives here, on the subtitle line, so a long
+                // label can never push the header buttons into each other.
                 Text(
-                    text = "Xray / Sing-box • Multi-Protocol Engine",
+                    text = "Xray / Sing-box • ${routingMode.title}",
                     color = AppTheme.colors.textSecondary,
-                    fontSize = 11.sp
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // Top action buttons: Telegram Channel & Dark/Light Mode Switcher
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Telegram quick button
-                IconButton(
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Top actions: Telegram channel, theme switch, routing screen.
+            // Three fixed 34dp targets + 2 gaps = a constant 118dp.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                HeaderActionButton(
+                    icon = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Telegram channel",
+                    tint = Color(0xFF229ED9),
+                    background = Color(0xFF229ED9).copy(alpha = 0.15f),
+                    borderColor = Color(0xFF229ED9).copy(alpha = 0.4f),
+                    testTag = "telegram_top_button",
                     onClick = {
                         try {
                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(TELEGRAM_CHANNEL_URL))
@@ -194,69 +262,30 @@ fun DashboardScreen(
                         } catch (_: Exception) {
                             viewModel.openTelegramDialog()
                         }
-                    },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF229ED9).copy(alpha = 0.15f))
-                        .border(1.dp, Color(0xFF229ED9).copy(alpha = 0.4f), CircleShape)
-                        .testTag("telegram_top_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Mirovex Telegram",
-                        tint = Color(0xFF229ED9),
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // Theme Mode Switcher
-                IconButton(
-                    onClick = { viewModel.toggleDarkTheme() },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(AppTheme.colors.surfaceVariant)
-                        .border(1.dp, AppTheme.colors.border, CircleShape)
-                        .testTag("theme_toggle_button")
-                ) {
-                    Icon(
-                        imageVector = if (isDarkTheme) Icons.Default.Brightness7 else Icons.Default.Brightness4,
-                        contentDescription = "Toggle Theme",
-                        tint = AppTheme.colors.accentCyan,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                // Route Mode Pill
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(AppTheme.colors.surface)
-                        .border(1.dp, AppTheme.colors.border, RoundedCornerShape(20.dp))
-                        .clickable { onNavigateToRouting() }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Routing",
-                            tint = AppTheme.colors.accentCyan,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = routingMode.title,
-                            color = AppTheme.colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
                     }
-                }
+                )
+
+                HeaderActionButton(
+                    icon = if (isDarkTheme) Icons.Default.Brightness7 else Icons.Default.Brightness4,
+                    contentDescription = "Toggle theme",
+                    tint = AppTheme.colors.accentCyan,
+                    background = AppTheme.colors.surfaceVariant,
+                    borderColor = AppTheme.colors.border,
+                    testTag = "theme_toggle_button",
+                    iconSize = 18,
+                    onClick = { viewModel.toggleDarkTheme() }
+                )
+
+                HeaderActionButton(
+                    icon = Icons.Default.Tune,
+                    contentDescription = "Routing mode: ${routingMode.title}",
+                    tint = AppTheme.colors.accentCyan,
+                    background = AppTheme.colors.surface,
+                    borderColor = AppTheme.colors.border,
+                    testTag = "routing_mode_pill",
+                    iconSize = 16,
+                    onClick = { onNavigateToRouting() }
+                )
             }
         }
 
@@ -467,7 +496,10 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
                         Box(
                             modifier = Modifier
                                 .size(8.dp)
@@ -480,14 +512,19 @@ fun DashboardScreen(
                             color = if (isConnected) AppTheme.colors.accentMint else AppTheme.colors.textSecondary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
+
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     // Click to browse or change server
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
+                            .wrapContentWidth()
                             .clip(RoundedCornerShape(6.dp))
                             .background(AppTheme.colors.surfaceVariant)
                             .padding(horizontal = 8.dp, vertical = 3.dp)
@@ -496,7 +533,8 @@ fun DashboardScreen(
                             text = "تغییر سرور",
                             color = AppTheme.colors.accentCyan,
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                         Spacer(modifier = Modifier.width(3.dp))
                         Icon(
@@ -519,7 +557,8 @@ fun DashboardScreen(
                         color = AppTheme.colors.textPrimary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
 
                     Spacer(modifier = Modifier.height(6.dp))
@@ -541,13 +580,15 @@ fun DashboardScreen(
                                 color = AppTheme.colors.accentCyan,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1
                             )
                         }
 
                         // Host:Port badge
                         Box(
                             modifier = Modifier
+                                .weight(1f, fill = false)
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(AppTheme.colors.surfaceVariant)
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -556,13 +597,16 @@ fun DashboardScreen(
                                 text = "${server.server}:${server.port}",
                                 color = AppTheme.colors.textSecondary,
                                 fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
                         // Subscription badge
                         Box(
                             modifier = Modifier
+                                .weight(1f, fill = false)
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(Color(0xFF229ED9).copy(alpha = 0.12f))
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -571,7 +615,9 @@ fun DashboardScreen(
                                 text = parentSub?.let { "📂 ${it.name}" } ?: "📁 نود دستی",
                                 color = Color(0xFF229ED9),
                                 fontSize = 10.sp,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -589,13 +635,15 @@ fun DashboardScreen(
                                 color = pingColor,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1
                             )
                         } else {
                             Text(
                                 text = "تست نشده",
                                 color = AppTheme.colors.textMuted,
-                                fontSize = 10.sp
+                                fontSize = 10.sp,
+                                maxLines = 1
                             )
                         }
                     }
@@ -670,18 +718,25 @@ fun DashboardScreen(
                                 text = "اتصال فوری تلگرام (پروکسی داخلی برنامه)",
                                 color = Color.White,
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
                                 text = "لمس کنید تا تلگرام مستقیماً به نود فعال وصل شود",
                                 color = AppTheme.colors.textSecondary,
-                                fontSize = 10.sp
+                                fontSize = 10.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
+                    Spacer(modifier = Modifier.width(8.dp))
+
                     Box(
                         modifier = Modifier
+                            .wrapContentWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF229ED9))
                             .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -690,7 +745,8 @@ fun DashboardScreen(
                             text = "اتصال به تلگرام",
                             color = Color.White,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                     }
                 }
@@ -745,26 +801,35 @@ fun DashboardScreen(
                                 text = "کانال رسمی Mirovex",
                                 color = AppTheme.colors.textPrimary,
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = "@MirovexOfficial",
                                 color = Color(0xFF229ED9),
                                 fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                         Text(
                             text = "دریافت آخرین سرورهای اختصاصی و کانفیگ‌های پرسرعت",
                             color = AppTheme.colors.textSecondary,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
+                Spacer(modifier = Modifier.width(8.dp))
+
                 Box(
                     modifier = Modifier
+                        .wrapContentWidth()
                         .clip(RoundedCornerShape(6.dp))
                         .background(Color(0xFF229ED9))
                         .padding(horizontal = 10.dp, vertical = 5.dp)
@@ -773,7 +838,8 @@ fun DashboardScreen(
                         text = "ورود",
                         color = Color.White,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
                     )
                 }
             }
@@ -800,9 +866,16 @@ fun DashboardScreen(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
-                        letterSpacing = 1.sp
+                        letterSpacing = 1.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.wrapContentWidth()
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Speed,
                             contentDescription = "Throughput",
@@ -815,7 +888,8 @@ fun DashboardScreen(
                             color = if (isConnected) AppTheme.colors.accentMint else AppTheme.colors.textMuted,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1
                         )
                     }
                 }
@@ -828,20 +902,23 @@ fun DashboardScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(text = "↓", color = AppTheme.colors.accentCyan, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(text = "DOWNLOAD", color = AppTheme.colors.textSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            Text(text = "DOWNLOAD", color = AppTheme.colors.textSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
                         }
                         Text(
                             text = formatBytesPerSec(trafficStats.downloadSpeedBytes),
                             color = AppTheme.colors.textPrimary,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "Total: ${formatTotalBytes(trafficStats.totalDownloadBytes)}",
                             color = AppTheme.colors.textMuted,
                             fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1
                         )
                     }
 
@@ -861,20 +938,23 @@ fun DashboardScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(text = "↑", color = AppTheme.colors.accentMint, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(text = "UPLOAD", color = AppTheme.colors.textSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            Text(text = "UPLOAD", color = AppTheme.colors.textSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
                         }
                         Text(
                             text = formatBytesPerSec(trafficStats.uploadSpeedBytes),
                             color = AppTheme.colors.textPrimary,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "Total: ${formatTotalBytes(trafficStats.totalUploadBytes)}",
                             color = AppTheme.colors.textMuted,
                             fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1
                         )
                     }
                 }
@@ -896,7 +976,10 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Bolt,
                             contentDescription = null,
@@ -908,13 +991,18 @@ fun DashboardScreen(
                             text = "اتصال هوشمند به بهترین پروفایل",
                             color = AppTheme.colors.textPrimary,
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
+
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     // Auto Connect Action Button
                     Box(
                         modifier = Modifier
+                            .wrapContentWidth()
                             .clip(RoundedCornerShape(6.dp))
                             .background(AppTheme.colors.accentCyan.copy(alpha = 0.15f))
                             .border(1.dp, AppTheme.colors.accentCyan.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
@@ -929,7 +1017,8 @@ fun DashboardScreen(
                                 text = "اتصال خودکار",
                                 color = AppTheme.colors.accentCyan,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
                             )
                         }
                     }
@@ -966,7 +1055,9 @@ fun DashboardScreen(
                                     text = strategy.persianTitle,
                                     color = activeText,
                                     fontSize = 11.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -991,7 +1082,10 @@ fun DashboardScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
                             Icon(
                                 imageVector = Icons.Default.FilterAlt,
                                 contentDescription = null,
@@ -1003,9 +1097,13 @@ fun DashboardScreen(
                                 text = "دامنه سوئیچ خودکار:",
                                 color = AppTheme.colors.textSecondary,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         // Reset or Active Scope Indicator
                         if (activeSubscriptionId != null) {
@@ -1013,6 +1111,7 @@ fun DashboardScreen(
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
+                                    .widthIn(max = 160.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFF229ED9).copy(alpha = 0.15f))
                                     .clickable { viewModel.setActiveSubscriptionFilter(null) }
@@ -1022,7 +1121,10 @@ fun DashboardScreen(
                                     text = "فقط $activeSubName",
                                     color = Color(0xFF229ED9),
                                     fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
                                 )
                                 Spacer(modifier = Modifier.width(3.dp))
                                 Icon(
@@ -1036,7 +1138,8 @@ fun DashboardScreen(
                             Text(
                                 text = "همه سرورها",
                                 color = AppTheme.colors.textMuted,
-                                fontSize = 10.sp
+                                fontSize = 10.sp,
+                                maxLines = 1
                             )
                         }
                     }
@@ -1044,7 +1147,7 @@ fun DashboardScreen(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     // Quick Chips for Subscriptions
-                    androidx.compose.foundation.lazy.LazyRow(
+                    LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1062,7 +1165,8 @@ fun DashboardScreen(
                                     text = "🌐 همه نودها",
                                     color = if (isAll) AppTheme.colors.accentCyan else AppTheme.colors.textSecondary,
                                     fontSize = 10.sp,
-                                    fontWeight = if (isAll) FontWeight.Bold else FontWeight.Normal
+                                    fontWeight = if (isAll) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1
                                 )
                             }
                         }
@@ -1071,6 +1175,7 @@ fun DashboardScreen(
                             val isThis = activeSubscriptionId == sub.id
                             Box(
                                 modifier = Modifier
+                                    .widthIn(max = 200.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(if (isThis) Color(0xFF229ED9).copy(alpha = 0.2f) else AppTheme.colors.surfaceVariant)
                                     .border(0.75.dp, if (isThis) Color(0xFF229ED9) else AppTheme.colors.border, RoundedCornerShape(6.dp))
@@ -1081,7 +1186,9 @@ fun DashboardScreen(
                                     text = "📂 ${sub.name} (${sub.totalNodes} نود)",
                                     color = if (isThis) Color(0xFF229ED9) else AppTheme.colors.textSecondary,
                                     fontSize = 10.sp,
-                                    fontWeight = if (isThis) FontWeight.Bold else FontWeight.Normal
+                                    fontWeight = if (isThis) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -1131,7 +1238,10 @@ fun DashboardScreen(
                                 text = "بهینه‌ساز باتری و رم (Eco Profile)",
                                 color = AppTheme.colors.textPrimary,
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             if (batterySaverEnabled) {
@@ -1145,7 +1255,8 @@ fun DashboardScreen(
                                         text = "کاهش مصرف ۶۶٪",
                                         color = AppTheme.colors.accentMint,
                                         fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
                                     )
                                 }
                             }
@@ -1153,10 +1264,14 @@ fun DashboardScreen(
                         Text(
                             text = "کاهش بیدارباش‌های CPU و مانیتورینگ سبک در پس‌زمینه",
                             color = AppTheme.colors.textSecondary,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.width(8.dp))
 
                 Switch(
                     checked = batterySaverEnabled,
@@ -1190,14 +1305,18 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
                         Text(
                             text = "ACTIVE PROFILE",
                             color = AppTheme.colors.textMuted,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace,
-                            letterSpacing = 1.sp
+                            letterSpacing = 1.sp,
+                            maxLines = 1
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         if (server != null) {
@@ -1205,14 +1324,19 @@ fun DashboardScreen(
                         }
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.wrapContentWidth()
+                    ) {
                         IconButton(
                             onClick = { showJsonDialog = true },
                             modifier = Modifier.size(28.dp)
                         ) {
                             Icon(Icons.Default.Code, contentDescription = "View Sing-box Config", tint = AppTheme.colors.accentCyan)
                         }
-                        Spacer(modifier = Modifier.width(4.dp))
                         IconButton(
                             onClick = { onNavigateToServers() },
                             modifier = Modifier.size(28.dp)
@@ -1229,14 +1353,18 @@ fun DashboardScreen(
                         text = server.name,
                         color = AppTheme.colors.textPrimary,
                         fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "${server.server}:${server.port}" + if (server.sni.isNotBlank()) " • SNI: ${server.sni}" else "",
                         color = AppTheme.colors.textSecondary,
                         fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
@@ -1246,20 +1374,28 @@ fun DashboardScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
                             LatencyBadge(latencyMs = server.lastPingMs, isRealDelay = server.isRealDelay)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (server.security.isNotBlank() && server.security != "none") "• ${server.security.uppercase()}" else "",
                                 color = AppTheme.colors.textMuted,
                                 fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         // Test Ping button
                         Box(
                             modifier = Modifier
+                                .wrapContentWidth()
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(AppTheme.colors.surfaceVariant)
                                 .clickable { viewModel.realDelayTest(server) }
@@ -1268,7 +1404,7 @@ fun DashboardScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.FlashOn, contentDescription = "Test Ping", tint = AppTheme.colors.accentCyan, modifier = Modifier.size(13.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Ping Test", color = AppTheme.colors.accentCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Ping Test", color = AppTheme.colors.accentCyan, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                             }
                         }
                     }

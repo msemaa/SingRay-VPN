@@ -34,20 +34,28 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.text.DecimalFormat
 import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Foreground proxy service.
  *
- * It runs a real protocol core (VLESS / VMess / Trojan / Shadowsocks) behind a
- * local SOCKS5 + HTTP inbound on 127.0.0.1:10808 / :10809 and only reports
- * CONNECTED after real data has travelled through the tunnel.
+ * It runs a real protocol core (native sing-box / Xray, or the built-in Kotlin
+ * core) behind a local SOCKS5 + HTTP inbound on 127.0.0.1:10808 / :10809 and
+ * only reports CONNECTED after real data has travelled through the tunnel.
+ *
+ * Switching profiles is a full restart: every connect() attempt first tears the
+ * previous session down completely (core, TUN, inbounds, stats) and waits for
+ * the local ports to be released. Without that, the second connection inherits
+ * the first one's outbound and dies with "stream closed after 0/1 bytes".
  */
 class SingRayVpnService : VpnService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
     private var statsJob: Job? = null
+    private var connectJob: Job? = null
     private var socksServer: LocalProxyServer? = null
     private var httpServer: LocalProxyServer? = null
     private val proxyRx = AtomicLong(0)
@@ -137,7 +145,22 @@ class SingRayVpnService : VpnService() {
     }
 
     private fun connect(serverId: Long, routingMode: String, batterySaver: Boolean) {
+        // ---------------------------------------------------------------
+        // Hard reset of any previous session. This is what makes profile
+        // switching work: without it the old core keeps the TUN and the old
+        // inbounds keep 10808/10809, so the new profile never gets used.
+        // ---------------------------------------------------------------
+        connectJob?.cancel()
+        val hadPreviousSession = _connectionStatus.value != ConnectionStatus.DISCONNECTED ||
+            socksServer != null || httpServer != null || CoreManager.active != null
+        if (hadPreviousSession) {
+            log("INFO", "CORE", "Switching profile: stopping the previous session first")
+        }
+        stopEverything()
+
         _lastError.value = null
+        _activeCore.value = CoreType.BUILT_IN
+        _trafficStats.value = TrafficStats()
         _connectionStatus.value = ConnectionStatus.CONNECTING
 
         val initial = buildNotification("Connecting...", "Starting core")
@@ -147,7 +170,12 @@ class SingRayVpnService : VpnService() {
             startForeground(NOTIFICATION_ID, initial)
         }
 
-        serviceScope.launch {
+        connectJob = serviceScope.launch {
+            if (hadPreviousSession) {
+                // Give the OS a moment to release the listening sockets.
+                awaitPortsFree(SOCKS_PORT, HTTP_PORT)
+            }
+
             val dao = SingRayDatabase.getDatabase(applicationContext).serverDao()
             val server: ServerEntity? =
                 if (serverId > 0) dao.getServerById(serverId) else dao.getSelectedServerSync()
@@ -165,9 +193,12 @@ class SingRayVpnService : VpnService() {
             // ---------------------------------------------------------------
             val (chosen, pickReason) = CoreManager.pickCoreWithReason(server, corePreference)
             log("INFO", "CORE", "Target core: ${chosen.title} ($pickReason)")
+            CoreManager.unavailableReasons().forEach { (core, why) ->
+                log("WARN", "CORE", "${core.title} is not usable in this build: $why")
+            }
             var nativeFailureReason: String? = null
             if (chosen == CoreType.SING_BOX || chosen == CoreType.XRAY) {
-                // sing-box can own the TUN itself; Xray needs the local proxy.
+                // sing-box can own the TUN itself; Xray works behind the local proxy.
                 val fd: Int? = if (chosen == CoreType.SING_BOX && SingBoxEngine.isAvailable()) {
                     establishTun()
                 } else null
@@ -197,7 +228,7 @@ class SingRayVpnService : VpnService() {
                     // Verify through the core's own SOCKS inbound.
                     val ok = ConnectivityTester.socksProbe("127.0.0.1", SOCKS_PORT)
                     if (!ok.success) {
-                        fail("${started.core.title} connected, but traffic probe failed: ${ok.message} [Selection: $pickReason]")
+                        fail("${started.core.title} started, but no traffic passed: ${ok.message} [Core: $pickReason]")
                         return@launch
                     }
                     log("INFO", "TEST", "Tunnel verified through ${started.core.title} in ${ok.latencyMs} ms")
@@ -208,22 +239,23 @@ class SingRayVpnService : VpnService() {
                 }
 
                 closeTun()
+                try { CoreManager.stop() } catch (_: Exception) {}
                 nativeFailureReason = started.message
                 log("WARN", "CORE", started.message)
             }
 
             _activeCore.value = CoreType.BUILT_IN
-            log("INFO", "CORE", "Using the built-in Kotlin core")
+            log("INFO", "CORE", "Falling back to the built-in Kotlin core")
 
             // 1. Build the real outbound. Unsupported configs fail loudly here.
             val outbound = try {
                 OutboundFactory.create(server, this@SingRayVpnService)
             } catch (e: UnsupportedConfigException) {
                 val prefix = if (nativeFailureReason != null) "$nativeFailureReason. " else ""
-                fail("${prefix}Built-in core does not support ${server.protocol.uppercase()}${if (server.security.isNotBlank()) "/${server.security}" else ""}: ${e.message} [Selection: $pickReason]")
+                fail("${prefix}Built-in core does not support ${server.protocol.uppercase()}${if (server.security.isNotBlank()) "/${server.security}" else ""}: ${e.message} [Core: $pickReason]")
                 return@launch
             } catch (e: Exception) {
-                fail("Failed to build outbound: ${e.message} [Selection: $pickReason]")
+                fail("Failed to build outbound: ${e.message} [Core: $pickReason]")
                 return@launch
             }
             activeOutbound = outbound
@@ -233,7 +265,7 @@ class SingRayVpnService : VpnService() {
             val probe = ConnectivityTester.realDelay(server, this@SingRayVpnService)
             if (!probe.success) {
                 val prefix = if (nativeFailureReason != null) "$nativeFailureReason. " else ""
-                fail("${prefix}Tunnel handshake failed: ${probe.message} [Selection: $pickReason]")
+                fail("${prefix}Tunnel handshake failed: ${probe.message} [Core: $pickReason]")
                 return@launch
             }
             log("INFO", "TEST", "Tunnel verified in ${probe.latencyMs} ms -> ${probe.message}")
@@ -270,6 +302,25 @@ class SingRayVpnService : VpnService() {
             _trafficStats.value = TrafficStats(currentLatencyMs = probe.latencyMs)
             startTrafficMonitoring(server.name, batterySaver, probe.latencyMs)
         }
+    }
+
+    /** Waits (max ~1.5 s) until the local inbound ports can be bound again. */
+    private suspend fun awaitPortsFree(vararg ports: Int) {
+        repeat(15) {
+            if (ports.all { port -> isPortFree(port) }) return
+            delay(100)
+        }
+        log("WARN", "INBOUND", "Local ports were still busy after the previous session; continuing anyway")
+    }
+
+    private fun isPortFree(port: Int): Boolean = try {
+        ServerSocket().use { socket ->
+            socket.reuseAddress = true
+            socket.bind(InetSocketAddress("127.0.0.1", port))
+            true
+        }
+    } catch (_: Exception) {
+        false
     }
 
     private fun fail(message: String) {
@@ -347,12 +398,14 @@ class SingRayVpnService : VpnService() {
 
     private fun stopEverything() {
         statsJob?.cancel()
+        statsJob = null
         try { CoreManager.stop() } catch (_: Exception) {}
         closeTun()
         try { socksServer?.stop() } catch (_: Exception) {}
         try { httpServer?.stop() } catch (_: Exception) {}
         socksServer = null
         httpServer = null
+        try { activeOutbound?.close() } catch (_: Throwable) {}
         activeOutbound = null
         proxyRx.set(0)
         proxyTx.set(0)
@@ -361,6 +414,8 @@ class SingRayVpnService : VpnService() {
     private fun disconnect() {
         _connectionStatus.value = ConnectionStatus.DISCONNECTING
         log("INFO", "CORE", "Stopping core...")
+        connectJob?.cancel()
+        connectJob = null
         stopEverything()
         _trafficStats.value = TrafficStats()
         _connectionStatus.value = ConnectionStatus.DISCONNECTED
@@ -371,6 +426,7 @@ class SingRayVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        connectJob?.cancel()
         stopEverything()
         _connectionStatus.value = ConnectionStatus.DISCONNECTED
         super.onDestroy()

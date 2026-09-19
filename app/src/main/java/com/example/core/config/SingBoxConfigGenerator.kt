@@ -5,137 +5,49 @@ import com.example.model.RoutingMode
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Builds sing-box configuration using the **1.12+ / 1.14 schema**.
+ *
+ * The legacy schema that older clients still emit was removed in sing-box
+ * 1.14 and produces errors such as:
+ *   `decode config: dns.servers[0]: legacy DNS server formats are deprecated`
+ *   `decode config: dns.rules[0]: json: unknown field "outbound"`
+ *
+ * Everything below therefore uses the modern shapes:
+ *  - DNS servers are typed objects (`type` + `server`), never address strings
+ *  - DNS rules never use the removed `outbound` field; the proxy host is
+ *    resolved through `route.default_domain_resolver`
+ *  - `block` outbound is gone, rejection happens through route actions
+ *  - sniffing and DNS hijacking are route actions, not inbound booleans
+ *  - the tun inbound uses the `address` array instead of `inet4_address`
+ *  - WireGuard is an `endpoint` with a `peers` array, not an outbound
+ */
 object SingBoxConfigGenerator {
 
+    // ---------------------------------------------------------------- public
+
+    /** Pretty config shown in the UI. */
     fun generateSingBoxJson(
         server: ServerEntity,
         routingMode: RoutingMode = RoutingMode.RULE,
         bypassLan: Boolean = true,
         bypassIran: Boolean = true,
         dnsServer: String = "1.1.1.1",
-        mtu: Int = 1500
-    ): String {
-        val root = JSONObject()
+        mtu: Int = 9000
+    ): String = buildRoot(
+        server = server,
+        routingMode = routingMode,
+        bypassLan = bypassLan,
+        bypassIran = bypassIran,
+        dnsServer = dnsServer,
+        socksPort = 10808,
+        httpPort = 10809,
+        useTun = true,
+        mtu = mtu,
+        logLevel = "info"
+    ).toString(2)
 
-        // 1. Log block
-        val log = JSONObject().apply {
-            put("disabled", false)
-            put("level", "info")
-            put("timestamp", true)
-        }
-        root.put("log", log)
-
-        // 2. DNS block
-        val dns = JSONObject()
-        val dnsServers = JSONArray().apply {
-            put(JSONObject().apply {
-                put("tag", "dns-remote")
-                put("address", "https://$dnsServer/dns-query")
-                put("detour", "proxy")
-            })
-            put(JSONObject().apply {
-                put("tag", "dns-local")
-                put("address", "udp://8.8.8.8")
-                put("detour", "direct")
-            })
-        }
-        dns.put("servers", dnsServers)
-        root.put("dns", dns)
-
-        // 3. Inbounds (TUN)
-        val inbounds = JSONArray()
-        val tunInbound = JSONObject().apply {
-            put("type", "tun")
-            put("tag", "tun-in")
-            put("interface_name", "singray-tun")
-            put("inet4_address", "172.19.0.1/30")
-            put("mtu", mtu)
-            put("auto_route", true)
-            put("strict_route", true)
-            put("stack", "mixed")
-            put("sniff", true)
-        }
-        inbounds.put(tunInbound)
-        root.put("inbounds", inbounds)
-
-        // 4. Outbounds
-        val outbounds = JSONArray()
-
-        // Selector / Main Outbound
-        val nodeOutbound = createOutboundForServer(server)
-        outbounds.put(JSONObject().apply {
-            put("type", "selector")
-            put("tag", "proxy")
-            put("outbounds", JSONArray().put(nodeOutbound.getString("tag")))
-        })
-        outbounds.put(nodeOutbound)
-
-        // Direct & Block
-        outbounds.put(JSONObject().apply {
-            put("type", "direct")
-            put("tag", "direct")
-        })
-        outbounds.put(JSONObject().apply {
-            put("type", "block")
-            put("tag", "block")
-        })
-        root.put("outbounds", outbounds)
-
-        // 5. Route block
-        val route = JSONObject()
-        val rules = JSONArray()
-
-        // DNS rule
-        rules.put(JSONObject().apply {
-            put("protocol", "dns")
-            put("outbound", "dns-remote")
-        })
-
-        when (routingMode) {
-            RoutingMode.GLOBAL -> {
-                rules.put(JSONObject().apply {
-                    put("outbound", "proxy")
-                })
-            }
-            RoutingMode.DIRECT -> {
-                rules.put(JSONObject().apply {
-                    put("outbound", "direct")
-                })
-            }
-            RoutingMode.RULE -> {
-                if (bypassLan) {
-                    rules.put(JSONObject().apply {
-                        put("ip_is_private", true)
-                        put("outbound", "direct")
-                    })
-                }
-                if (bypassIran) {
-                    rules.put(JSONObject().apply {
-                        put("geoip", JSONArray().put("ir"))
-                        put("geosite", JSONArray().put("category-ir"))
-                        put("outbound", "direct")
-                    })
-                }
-                rules.put(JSONObject().apply {
-                    put("outbound", "proxy")
-                })
-            }
-        }
-
-        route.put("rules", rules)
-        route.put("auto_detect_interface", true)
-        root.put("route", route)
-
-        return root.toString(2)
-    }
-
-    /**
-     * Runtime config actually handed to the native sing-box core.
-     *
-     * Unlike [generateSingBoxJson] (which is the pretty preview shown in the UI)
-     * this always exposes a mixed SOCKS/HTTP inbound on localhost, and adds the
-     * tun inbound only when the VpnService established a TUN interface.
-     */
+    /** Config actually handed to the native core. */
     fun generateRuntimeJson(
         server: ServerEntity,
         routingMode: RoutingMode = RoutingMode.RULE,
@@ -146,88 +58,210 @@ object SingBoxConfigGenerator {
         httpPort: Int = 10809,
         useTun: Boolean = false,
         mtu: Int = 9000
-    ): String {
+    ): String = buildRoot(
+        server = server,
+        routingMode = routingMode,
+        bypassLan = bypassLan,
+        bypassIran = bypassIran,
+        dnsServer = dnsServer,
+        socksPort = socksPort,
+        httpPort = httpPort,
+        useTun = useTun,
+        mtu = mtu,
+        logLevel = "warn"
+    ).toString()
+
+    /** True when this protocol is declared under `endpoints` instead of `outbounds`. */
+    private fun isEndpointProtocol(protocol: String): Boolean =
+        protocol.lowercase() in setOf("wireguard", "wg")
+
+    // ----------------------------------------------------------------- root
+
+    private fun buildRoot(
+        server: ServerEntity,
+        routingMode: RoutingMode,
+        bypassLan: Boolean,
+        bypassIran: Boolean,
+        dnsServer: String,
+        socksPort: Int,
+        httpPort: Int,
+        useTun: Boolean,
+        mtu: Int,
+        logLevel: String
+    ): JSONObject {
         val root = JSONObject()
 
         root.put("log", JSONObject().apply {
             put("disabled", false)
-            put("level", "warn")
+            put("level", logLevel)
             put("timestamp", true)
         })
 
-        root.put("dns", JSONObject().apply {
-            put("servers", JSONArray().apply {
-                put(JSONObject().apply {
-                    put("tag", "dns-remote")
-                    put("address", "https://$dnsServer/dns-query")
-                    put("detour", "proxy")
-                })
-                put(JSONObject().apply {
-                    put("tag", "dns-direct")
-                    put("address", "udp://8.8.8.8")
-                    put("detour", "direct")
-                })
+        root.put("dns", buildDns(dnsServer, bypassIran))
+        root.put("inbounds", buildInbounds(socksPort, httpPort, useTun, mtu))
+
+        if (isEndpointProtocol(server.protocol)) {
+            // sing-box 1.14 removed the legacy `wireguard` outbound.
+            root.put("endpoints", JSONArray().put(buildWireGuardEndpoint(server)))
+            root.put("outbounds", JSONArray().put(JSONObject().apply {
+                put("type", "direct")
+                put("tag", "direct")
+            }))
+        } else {
+            root.put("outbounds", buildOutbounds(server))
+        }
+
+        root.put("route", buildRoute(routingMode, bypassLan, bypassIran))
+
+        root.put("experimental", JSONObject().apply {
+            put("cache_file", JSONObject().apply {
+                put("enabled", true)
+                put("store_fakeip", false)
             })
-            put("strategy", "prefer_ipv4")
-            put("independent_cache", true)
         })
 
+        return root
+    }
+
+    // ------------------------------------------------------------------ dns
+
+    private fun buildDns(dnsServer: String, bypassIran: Boolean): JSONObject {
+        val servers = JSONArray()
+        servers.put(JSONObject().apply {
+            put("type", "https")
+            put("tag", "dns-remote")
+            put("server", dnsServer.ifBlank { "1.1.1.1" })
+            put("detour", "proxy")
+        })
+        servers.put(JSONObject().apply {
+            put("type", "udp")
+            put("tag", "dns-direct")
+            put("server", "8.8.8.8")
+            put("detour", "direct")
+        })
+
+        val rules = JSONArray()
+        // NOTE: do NOT add a `{"outbound": "any"}` rule here. That field was
+        // deprecated in sing-box 1.12 and removed in 1.14: the whole config is
+        // rejected at decode time. The proxy server's own hostname is resolved
+        // by `route.default_domain_resolver` (dns-direct) instead.
+        if (bypassIran) {
+            rules.put(JSONObject().apply {
+                put("domain_suffix", JSONArray().put(".ir"))
+                put("server", "dns-direct")
+            })
+        }
+
+        return JSONObject().apply {
+            put("servers", servers)
+            if (rules.length() > 0) put("rules", rules)
+            put("final", "dns-remote")
+            put("strategy", "prefer_ipv4")
+            put("independent_cache", true)
+        }
+    }
+
+    // ------------------------------------------------------------- inbounds
+
+    private fun buildInbounds(
+        socksPort: Int,
+        httpPort: Int,
+        useTun: Boolean,
+        mtu: Int
+    ): JSONArray {
         val inbounds = JSONArray()
         inbounds.put(JSONObject().apply {
             put("type", "mixed")
             put("tag", "mixed-in")
             put("listen", "127.0.0.1")
             put("listen_port", socksPort)
-            put("sniff", true)
-            put("sniff_override_destination", false)
         })
         inbounds.put(JSONObject().apply {
             put("type", "http")
             put("tag", "http-in")
             put("listen", "127.0.0.1")
             put("listen_port", httpPort)
-            put("sniff", true)
         })
         if (useTun) {
             inbounds.put(JSONObject().apply {
                 put("type", "tun")
                 put("tag", "tun-in")
-                put("interface_name", "singray-tun")
                 put("address", JSONArray().put("172.19.0.1/30"))
                 put("mtu", mtu)
                 put("auto_route", true)
                 put("strict_route", false)
                 put("stack", "mixed")
-                put("sniff", true)
             })
         }
-        root.put("inbounds", inbounds)
+        return inbounds
+    }
 
-        val nodeOutbound = createOutboundForServer(server).apply { put("tag", "proxy") }
-        val outbounds = JSONArray()
-            .put(nodeOutbound)
+    // ------------------------------------------------------------ outbounds
+
+    private fun buildOutbounds(server: ServerEntity): JSONArray {
+        val node = createOutboundForServer(server).apply { put("tag", "proxy") }
+        return JSONArray()
+            .put(node)
             .put(JSONObject().apply {
                 put("type", "direct")
                 put("tag", "direct")
             })
-            .put(JSONObject().apply {
-                put("type", "block")
-                put("tag", "block")
-            })
-            .put(JSONObject().apply {
-                put("type", "dns")
-                put("tag", "dns-out")
-            })
-        root.put("outbounds", outbounds)
+    }
 
+    /**
+     * WireGuard in the modern endpoint form.
+     *
+     * Field packing used by this app:
+     *  uuid      -> private key
+     *  publicKey -> peer public key
+     *  shortId   -> pre-shared key (optional)
+     *  path      -> local addresses, comma separated
+     */
+    private fun buildWireGuardEndpoint(server: ServerEntity): JSONObject = JSONObject().apply {
+        put("type", "wireguard")
+        put("tag", "proxy")
+        put("system", false)
+        put("mtu", 1408)
+        put("address", JSONArray().apply {
+            val addr = server.path.ifBlank { "172.16.0.2/32" }
+            addr.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { put(it) }
+        })
+        put("private_key", server.uuid)
+        put("peers", JSONArray().put(JSONObject().apply {
+            put("address", server.server)
+            put("port", server.port)
+            put("public_key", server.publicKey)
+            if (server.shortId.isNotBlank()) put("pre_shared_key", server.shortId)
+            put("allowed_ips", JSONArray().put("0.0.0.0/0").put("::/0"))
+            put("persistent_keepalive_interval", 25)
+        }))
+    }
+
+    // ---------------------------------------------------------------- route
+
+    private fun buildRoute(
+        routingMode: RoutingMode,
+        bypassLan: Boolean,
+        bypassIran: Boolean
+    ): JSONObject {
         val rules = JSONArray()
+
+        // Sniffing and DNS hijacking are actions in the modern schema.
+        rules.put(JSONObject().apply {
+            put("action", "sniff")
+        })
         rules.put(JSONObject().apply {
             put("protocol", "dns")
-            put("outbound", "dns-out")
+            put("action", "hijack-dns")
         })
+
         when (routingMode) {
-            RoutingMode.GLOBAL -> rules.put(JSONObject().apply { put("outbound", "proxy") })
-            RoutingMode.DIRECT -> rules.put(JSONObject().apply { put("outbound", "direct") })
+            RoutingMode.GLOBAL -> {
+                // everything to the proxy, handled by `final`
+            }
+            RoutingMode.DIRECT -> {
+                // everything direct, handled by `final`
+            }
             RoutingMode.RULE -> {
                 if (bypassLan) {
                     rules.put(JSONObject().apply {
@@ -237,123 +271,275 @@ object SingBoxConfigGenerator {
                 }
                 if (bypassIran) {
                     rules.put(JSONObject().apply {
-                        put("geoip", JSONArray().put("ir"))
+                        put("domain_suffix", JSONArray().put(".ir"))
                         put("outbound", "direct")
                     })
                 }
-                rules.put(JSONObject().apply { put("outbound", "proxy") })
             }
         }
-        root.put("route", JSONObject().apply {
+
+        return JSONObject().apply {
             put("rules", rules)
             put("final", if (routingMode == RoutingMode.DIRECT) "direct" else "proxy")
             put("auto_detect_interface", true)
-        })
+            // Resolves outbound server domains (including the proxy's own host)
+            // without looping back through the tunnel.
+            put("default_domain_resolver", JSONObject().apply {
+                put("server", "dns-direct")
+            })
+        }
+    }
 
-        return root.toString()
+    // ------------------------------------------------------------ outbound
+
+    private fun ServerEntity.serverName(): String = sni.ifBlank { host.ifBlank { server } }
+
+    private fun ServerEntity.alpnArray(): JSONArray? {
+        if (alpn.isBlank()) return null
+        val arr = JSONArray()
+        alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { arr.put(it) }
+        return if (arr.length() == 0) null else arr
+    }
+
+    /** TLS block with sane, protocol independent defaults. */
+    private fun buildTls(server: ServerEntity, forceEnabled: Boolean = false): JSONObject? {
+        val sec = server.security.lowercase()
+        val enabled = forceEnabled || sec == "tls" || sec == "reality" || sec == "xtls"
+        if (!enabled) return null
+
+        return JSONObject().apply {
+            put("enabled", true)
+            put("server_name", server.serverName())
+            put("insecure", server.insecure)
+            server.alpnArray()?.let { put("alpn", it) }
+
+            if (sec == "reality") {
+                put("reality", JSONObject().apply {
+                    put("enabled", true)
+                    put("public_key", server.publicKey)
+                    if (server.shortId.isNotBlank()) put("short_id", server.shortId)
+                })
+                // REALITY requires a uTLS fingerprint.
+                put("utls", JSONObject().apply {
+                    put("enabled", true)
+                    put("fingerprint", server.fingerprint.ifBlank { "chrome" })
+                })
+            } else if (server.fingerprint.isNotBlank() && server.fingerprint != "none") {
+                put("utls", JSONObject().apply {
+                    put("enabled", true)
+                    put("fingerprint", server.fingerprint)
+                })
+            }
+        }
+    }
+
+    /** v2ray transport block shared by vless / vmess / trojan. */
+    private fun buildTransport(server: ServerEntity): JSONObject? {
+        return when (server.network.lowercase()) {
+            "ws", "websocket" -> JSONObject().apply {
+                put("type", "ws")
+                val rawPath = server.path.ifBlank { "/" }
+                // Panels encode early data as `/path?ed=2048`.
+                val edValue = Regex("[?&]ed=(\\d+)").find(rawPath)?.groupValues?.get(1)?.toIntOrNull()
+                put("path", rawPath.substringBefore("?").ifBlank { "/" })
+                put("headers", JSONObject().apply {
+                    if (server.host.isNotBlank()) put("Host", server.host)
+                })
+                if (edValue != null) {
+                    put("max_early_data", edValue)
+                    put("early_data_header_name", "Sec-WebSocket-Protocol")
+                }
+            }
+            "grpc" -> JSONObject().apply {
+                put("type", "grpc")
+                put("service_name", server.path.trim('/').ifBlank { "GunService" })
+                put("idle_timeout", "15s")
+                put("ping_timeout", "15s")
+                put("permit_without_stream", false)
+            }
+            "httpupgrade" -> JSONObject().apply {
+                put("type", "httpupgrade")
+                put("path", server.path.substringBefore("?").ifBlank { "/" })
+                if (server.host.isNotBlank()) put("host", server.host)
+            }
+            "http", "h2", "h2c" -> JSONObject().apply {
+                put("type", "http")
+                put("path", server.path.ifBlank { "/" })
+                if (server.host.isNotBlank()) {
+                    put("host", JSONArray().put(server.host))
+                }
+            }
+            "quic" -> JSONObject().apply { put("type", "quic") }
+            else -> null // raw TCP needs no transport block
+        }
     }
 
     private fun createOutboundForServer(server: ServerEntity): JSONObject {
         val out = JSONObject()
-        val tag = "node-out"
-        out.put("tag", tag)
+        val host = server.server
+        val port = server.port
 
         when (server.protocol.lowercase()) {
             "vless" -> {
                 out.put("type", "vless")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
+                out.put("server", host)
+                out.put("server_port", port)
                 out.put("uuid", server.uuid)
-                out.put("flow", if (server.security == "reality") "xtls-rprx-vision" else "")
-
-                val tls = JSONObject().apply {
-                    put("enabled", server.security == "tls" || server.security == "reality")
-                    put("server_name", server.sni.ifBlank { server.server })
-                    put("insecure", server.insecure)
-                    if (server.security == "reality") {
-                        val reality = JSONObject().apply {
-                            put("enabled", true)
-                            put("public_key", server.publicKey)
-                            put("short_id", server.shortId)
-                        }
-                        put("reality", reality)
-                    }
-                    if (server.alpn.isNotBlank()) {
-                        put("alpn", JSONArray(server.alpn.split(",")))
-                    }
+                // XTLS Vision only makes sense over raw TCP with REALITY/TLS.
+                val raw = server.network.isBlank() ||
+                    server.network.equals("tcp", true) ||
+                    server.network.equals("raw", true)
+                if (raw && server.security.equals("reality", true)) {
+                    out.put("flow", "xtls-rprx-vision")
                 }
-                out.put("tls", tls)
-
-                if (server.network == "ws") {
-                    val transport = JSONObject().apply {
-                        put("type", "ws")
-                        put("path", server.path)
-                        val headers = JSONObject()
-                        if (server.host.isNotBlank()) headers.put("Host", server.host)
-                        put("headers", headers)
-                    }
-                    out.put("transport", transport)
-                }
+                out.put("packet_encoding", "xudp")
+                buildTls(server)?.let { out.put("tls", it) }
+                buildTransport(server)?.let { out.put("transport", it) }
             }
+
             "vmess" -> {
                 out.put("type", "vmess")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
+                out.put("server", host)
+                out.put("server_port", port)
                 out.put("uuid", server.uuid)
                 out.put("security", "auto")
                 out.put("alter_id", server.alterId)
-
-                val tls = JSONObject().apply {
-                    put("enabled", server.security == "tls")
-                    put("server_name", server.sni.ifBlank { server.server })
-                }
-                out.put("tls", tls)
+                out.put("packet_encoding", "xudp")
+                buildTls(server)?.let { out.put("tls", it) }
+                buildTransport(server)?.let { out.put("transport", it) }
             }
+
             "trojan" -> {
                 out.put("type", "trojan")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
+                out.put("server", host)
+                out.put("server_port", port)
                 out.put("password", server.uuid)
-
-                val tls = JSONObject().apply {
-                    put("enabled", true)
-                    put("server_name", server.sni.ifBlank { server.server })
-                }
-                out.put("tls", tls)
+                // Trojan is TLS by definition.
+                out.put("tls", buildTls(server, forceEnabled = true)!!)
+                buildTransport(server)?.let { out.put("transport", it) }
             }
-            "shadowsocks" -> {
+
+            "shadowsocks", "ss" -> {
                 out.put("type", "shadowsocks")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
+                out.put("server", host)
+                out.put("server_port", port)
                 out.put("method", server.fingerprint.ifBlank { "chacha20-ietf-poly1305" })
                 out.put("password", server.uuid)
+                out.put("udp_over_tcp", false)
             }
-            "hysteria2" -> {
-                out.put("type", "hysteria2")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
-                out.put("password", server.uuid)
 
-                val tls = JSONObject().apply {
-                    put("enabled", true)
-                    put("server_name", server.sni.ifBlank { server.server })
-                    put("insecure", server.insecure)
-                    put("alpn", JSONArray().put("h3"))
+            "hysteria2", "hy2" -> {
+                out.put("type", "hysteria2")
+                out.put("server", host)
+                out.put("server_port", port)
+                out.put("password", server.uuid)
+                if (server.path.isNotBlank()) {
+                    // salamander obfuscation, carried in the URI as obfs-password
+                    out.put("obfs", JSONObject().apply {
+                        put("type", "salamander")
+                        put("password", server.path)
+                    })
                 }
-                out.put("tls", tls)
+                out.put("tls", JSONObject().apply {
+                    put("enabled", true)
+                    put("server_name", server.serverName())
+                    put("insecure", server.insecure)
+                    put("alpn", server.alpnArray() ?: JSONArray().put("h3"))
+                })
             }
+
+            "hysteria", "hy" -> {
+                out.put("type", "hysteria")
+                out.put("server", host)
+                out.put("server_port", port)
+                out.put("auth_str", server.uuid)
+                // Hysteria v1 refuses to start without bandwidth hints.
+                out.put("up_mbps", 100)
+                out.put("down_mbps", 100)
+                out.put("tls", JSONObject().apply {
+                    put("enabled", true)
+                    put("server_name", server.serverName())
+                    put("insecure", server.insecure)
+                    put("alpn", server.alpnArray() ?: JSONArray().put("hysteria"))
+                })
+            }
+
+            "tuic" -> {
+                out.put("type", "tuic")
+                out.put("server", host)
+                out.put("server_port", port)
+                out.put("uuid", server.uuid)
+                out.put("password", server.path)
+                out.put("congestion_control", "bbr")
+                out.put("udp_relay_mode", "native")
+                out.put("zero_rtt_handshake", false)
+                out.put("heartbeat", "10s")
+                out.put("tls", JSONObject().apply {
+                    put("enabled", true)
+                    put("server_name", server.serverName())
+                    put("insecure", server.insecure)
+                    put("alpn", server.alpnArray() ?: JSONArray().put("h3"))
+                })
+            }
+
+            "anytls" -> {
+                out.put("type", "anytls")
+                out.put("server", host)
+                out.put("server_port", port)
+                out.put("password", server.uuid)
+                out.put("idle_session_check_interval", "30s")
+                out.put("idle_session_timeout", "30s")
+                out.put("tls", buildTls(server, forceEnabled = true)!!)
+            }
+
+            "shadowtls" -> {
+                out.put("type", "shadowtls")
+                out.put("server", host)
+                out.put("server_port", port)
+                out.put("version", 3)
+                out.put("password", server.uuid)
+                out.put("tls", buildTls(server, forceEnabled = true)!!)
+            }
+
+            "socks", "socks5" -> {
+                out.put("type", "socks")
+                out.put("server", host)
+                out.put("server_port", port)
+                out.put("version", "5")
+                if (server.host.isNotBlank()) out.put("username", server.host)
+                if (server.uuid.isNotBlank()) out.put("password", server.uuid)
+            }
+
+            "http", "https" -> {
+                out.put("type", "http")
+                out.put("server", host)
+                out.put("server_port", port)
+                if (server.host.isNotBlank()) out.put("username", server.host)
+                if (server.uuid.isNotBlank()) out.put("password", server.uuid)
+                buildTls(server)?.let { out.put("tls", it) }
+            }
+
             "ssh" -> {
                 out.put("type", "ssh")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
+                out.put("server", host)
+                out.put("server_port", port)
                 out.put("user", server.host.ifBlank { "root" })
-                out.put("password", server.uuid)
+                val secret = server.uuid.trim()
+                if (secret.startsWith("-----BEGIN")) {
+                    // PEM private key instead of a password.
+                    out.put("private_key", secret)
+                    if (server.shortId.isNotBlank()) out.put("private_key_passphrase", server.shortId)
+                } else if (secret.isNotBlank()) {
+                    out.put("password", secret)
+                }
             }
+
             else -> {
-                out.put("type", "vless")
-                out.put("server", server.server)
-                out.put("server_port", server.port)
-                out.put("uuid", server.uuid)
+                // Unknown protocol: fail loudly instead of silently dialing
+                // something that will never work.
+                throw IllegalArgumentException(
+                    "Protocol '" + server.protocol + "' is not supported by the sing-box core"
+                )
             }
         }
 

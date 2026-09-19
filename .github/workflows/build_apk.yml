@@ -5,10 +5,20 @@ on:
     branches: [ main, master ]
   pull_request:
   workflow_dispatch:
+    inputs:
+      allow_missing_cores:
+        description: "Build even if a native core could not be produced"
+        type: boolean
+        default: false
 
 concurrency:
   group: build-apk-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  SING_BOX_REF: v1.14.1
+  LIBXRAY_REF: main
+  NDK_VERSION: r28
 
 jobs:
   build:
@@ -18,7 +28,145 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Checkout sing-box ${{ env.SING_BOX_REF }}
+        uses: actions/checkout@v4
+        with:
+          repository: SagerNet/sing-box
+          ref: ${{ env.SING_BOX_REF }}
+          path: .cores/sing-box
+
+      - name: Checkout libXray
+        uses: actions/checkout@v4
+        with:
+          repository: XTLS/libXray
+          ref: ${{ env.LIBXRAY_REF }}
+          path: .cores/libXray
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      # sing-box's own build script refuses to run on anything but JDK 17
+      # (cmd/internal/build_libbox: checkJavaVersion wants "openjdk 17").
+      - name: Set up JDK 17 (core builds)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
+
+      - name: Build libbox.aar (sing-box core)
+        id: singbox
+        continue-on-error: true
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          cd .cores/sing-box
+          java --version
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          make lib_android
+          cd -
+          cp .cores/sing-box/libbox.aar app/libs/libbox.aar
+          echo "sing-box core: $(stat -c%s app/libs/libbox.aar) bytes"
+
+      - name: Fallback - prebuilt libbox.aar
+        if: steps.singbox.outcome != 'success'
+        continue-on-error: true
+        run: |
+          echo "::warning::Building sing-box from source failed, trying a prebuilt libbox.aar"
+          mkdir -p app/libs
+          curl -fL --retry 5 --retry-delay 5 \
+            "https://github.com/Leadaxe/sing-box-lx/releases/download/v1.14.1-lx.8/libbox-1.14.1-lx.8.aar" \
+            -o app/libs/libbox.aar || rm -f app/libs/libbox.aar
+
+      - name: Build libXray.aar (Xray-core)
+        id: libxray
+        continue-on-error: true
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          cd .cores/libXray
+          python3 build/main.py android
+          cd -
+          aar=$(find .cores/libXray -maxdepth 2 -name 'libXray*.aar' ! -name '*sources*' | head -n1)
+          test -n "$aar"
+          cp "$aar" app/libs/libXray.aar
+          # gomobile ships the same go/* helper classes in every AAR; keeping
+          # both breaks dexing with "Type go.Seq is defined multiple times".
+          python3 .ci/strip_go_classes.py app/libs/libXray.aar
+          echo "Xray core: $(stat -c%s app/libs/libXray.aar) bytes"
+
+      - name: Fallback - prebuilt libXray.aar
+        if: steps.libxray.outcome != 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "::warning::Building libXray from source failed, trying the published release"
+          mkdir -p app/libs
+          url=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/XTLS/libXray/releases/latest \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((a['browser_download_url'] for a in d.get('assets',[]) if 'android' in a['name'].lower() and a['name'].endswith('.zip')), ''))")
+          if [ -z "$url" ]; then exit 0; fi
+          curl -fL --retry 5 --retry-delay 5 "$url" -o /tmp/libxray.zip || exit 0
+          rm -rf /tmp/xray_out && unzip -q -o /tmp/libxray.zip -d /tmp/xray_out
+          found=$(find /tmp/xray_out -name '*.aar' ! -name '*sources*' | head -n1)
+          if [ -z "$found" ]; then exit 0; fi
+          cp "$found" app/libs/libXray.aar
+          python3 .ci/strip_go_classes.py app/libs/libXray.aar
+
+      # A green build that silently ships no native core is worse than a red
+      # one: the app can then only use the limited built-in Kotlin core.
+      - name: Verify bundled cores
+        run: |
+          ls -lh app/libs || true
+          missing=""
+          [ -s app/libs/libbox.aar ] || missing="$missing libbox.aar(sing-box)"
+          [ -s app/libs/libXray.aar ] || missing="$missing libXray.aar(Xray)"
+          {
+            echo "### Bundled native cores"
+            [ -s app/libs/libbox.aar ] && echo "- sing-box ${SING_BOX_REF} ($(stat -c%s app/libs/libbox.aar) bytes)" || echo "- sing-box: MISSING"
+            [ -s app/libs/libXray.aar ] && echo "- Xray / libXray ${LIBXRAY_REF} ($(stat -c%s app/libs/libXray.aar) bytes)" || echo "- Xray: MISSING"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$missing" ]; then
+            if [ "${{ github.event.inputs.allow_missing_cores }}" = "true" ]; then
+              echo "::warning::Missing cores:$missing (explicitly allowed)"
+            else
+              echo "::error::Missing native cores:$missing - refusing to publish an APK that can only use the built-in core"
+              exit 1
+            fi
+          fi
+
+      - name: Check that the two cores do not share native libraries
+        run: |
+          set -e
+          list_so() { unzip -l "$1" 2>/dev/null | awk '{print $4}' | grep '\.so$' | xargs -n1 basename 2>/dev/null | sort -u; }
+          a=$(list_so app/libs/libbox.aar || true)
+          b=$(list_so app/libs/libXray.aar || true)
+          echo "libbox:  $(echo $a | tr '\n' ' ')"
+          echo "libXray: $(echo $b | tr '\n' ' ')"
+          dup=$(comm -12 <(echo "$a") <(echo "$b") || true)
+          if [ -n "$dup" ]; then
+            echo "::error::Both cores ship the same native library ($dup); one of them would be overwritten at packaging time"
+            exit 1
+          fi
+
+      - name: Set up JDK 21 (Gradle)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -26,61 +174,6 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-
-      # ------------------------------------------------------------------
-      # Native cores are OPTIONAL. A failed download must never fail the
-      # build: the app falls back to the built-in Kotlin core.
-      # ------------------------------------------------------------------
-      - name: Fetch libbox.aar (sing-box core)
-        continue-on-error: true
-        run: |
-          mkdir -p app/libs
-          if [ -s app/libs/libbox.aar ]; then
-            echo "libbox.aar already present"
-            exit 0
-          fi
-          echo "Downloading prebuilt libbox.aar..."
-          curl -fL --retry 5 --retry-delay 5 \
-            "https://github.com/Leadaxe/sing-box-lx/releases/download/v1.14.1-lx.8/libbox-1.14.1-lx.8.aar" \
-            -o app/libs/libbox.aar || rm -f app/libs/libbox.aar
-          if [ -s app/libs/libbox.aar ]; then
-            echo "Downloaded libbox.aar ($(stat -c%s app/libs/libbox.aar) bytes)"
-          else
-            echo "::warning::libbox.aar unavailable - building without the sing-box native core"
-          fi
-
-      - name: Fetch libXray.aar (Xray-core)
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p app/libs
-          if [ -s app/libs/libXray.aar ]; then
-            echo "libXray.aar already present"
-            exit 0
-          fi
-          url=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/XTLS/libXray/releases/latest \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((a['browser_download_url'] for a in d.get('assets',[]) if 'android' in a['name'].lower() and a['name'].endswith('.zip')), ''))")
-          if [ -z "$url" ]; then
-            echo "::warning::No Android asset in the latest libXray release - skipping Xray core"
-            exit 0
-          fi
-          echo "Downloading $url"
-          curl -fL --retry 5 --retry-delay 5 "$url" -o /tmp/libxray.zip || exit 0
-          rm -rf /tmp/xray_out
-          unzip -q -o /tmp/libxray.zip -d /tmp/xray_out
-          found=$(find /tmp/xray_out -name "*.aar" | head -n1)
-          if [ -z "$found" ]; then
-            echo "::warning::No .aar inside the libXray archive - skipping Xray core"
-            exit 0
-          fi
-          cp "$found" app/libs/libXray.aar
-          python3 .ci/strip_go_classes.py app/libs/libXray.aar
-          echo "Prepared libXray.aar ($(stat -c%s app/libs/libXray.aar) bytes)"
-
-      - name: Report bundled cores
-        run: ls -lh app/libs || echo "no app/libs directory"
 
       - name: Ensure debug.keystore exists
         run: |
@@ -107,3 +200,10 @@ jobs:
           name: singray-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Upload native cores
+        uses: actions/upload-artifact@v4
+        with:
+          name: singray-native-cores
+          path: app/libs/*.aar
+          if-no-files-found: warn
