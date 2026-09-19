@@ -11,8 +11,20 @@ import org.json.JSONObject
  * Inbounds are a SOCKS5 + HTTP pair on localhost. When a TUN fd is available
  * the VpnService feeds it through tun2socks into the SOCKS inbound, which is
  * how every Xray-based Android client works (Xray itself has no tun inbound).
+ *
+ * Protocols Xray itself cannot speak (hysteria, hysteria2, tuic, anytls,
+ * shadowtls, ssh) are rejected here on purpose so the core manager can switch
+ * to sing-box instead of silently building a broken config.
  */
 object XrayConfigGenerator {
+
+    /** Protocols this core can actually carry. */
+    val SUPPORTED = setOf(
+        "vless", "vmess", "trojan", "shadowsocks", "ss",
+        "socks", "socks5", "http", "https", "wireguard", "wg"
+    )
+
+    fun supports(protocol: String): Boolean = protocol.lowercase() in SUPPORTED
 
     fun generate(
         server: ServerEntity,
@@ -24,6 +36,10 @@ object XrayConfigGenerator {
         httpPort: Int = 10809,
         tunFd: Int? = null
     ): String {
+        require(supports(server.protocol)) {
+            "Protocol '" + server.protocol + "' is not supported by the Xray core"
+        }
+
         val root = JSONObject()
 
         root.put("log", JSONObject().apply {
@@ -33,6 +49,7 @@ object XrayConfigGenerator {
         root.put("dns", JSONObject().apply {
             put("servers", JSONArray().put(dnsServer).put("8.8.8.8").put("localhost"))
             put("queryStrategy", "UseIP")
+            put("disableCache", false)
         })
 
         // ---- inbounds ----
@@ -112,7 +129,7 @@ object XrayConfigGenerator {
                     })
                     rules.put(JSONObject().apply {
                         put("type", "field")
-                        put("domain", JSONArray().put("geosite:category-ir"))
+                        put("domain", JSONArray().put("geosite:category-ir").put("regexp:.*\\.ir$"))
                         put("outboundTag", "direct")
                     })
                 }
@@ -128,6 +145,18 @@ object XrayConfigGenerator {
             put("rules", rules)
         })
 
+        root.put("policy", JSONObject().apply {
+            put("levels", JSONObject().apply {
+                put("8", JSONObject().apply {
+                    put("handshake", 4)
+                    put("connIdle", 300)
+                    put("uplinkOnly", 1)
+                    put("downlinkOnly", 1)
+                    put("bufferSize", 512)
+                })
+            })
+        })
+
         if (tunFd != null) {
             root.put("_tunFd", tunFd) // informational only; consumed by tun2socks
         }
@@ -138,6 +167,7 @@ object XrayConfigGenerator {
     private fun buildProxyOutbound(server: ServerEntity): JSONObject {
         val out = JSONObject().put("tag", "proxy")
         val protocol = server.protocol.lowercase()
+        var needsStream = true
 
         when (protocol) {
             "vless" -> {
@@ -150,10 +180,13 @@ object XrayConfigGenerator {
                             put("id", server.uuid)
                             put("encryption", "none")
                             put("level", 8)
-                            val flow = if (server.security.equals("reality", true)) {
-                                server.fingerprint.takeIf { it.startsWith("xtls") } ?: "xtls-rprx-vision"
-                            } else ""
-                            if (flow.isNotBlank()) put("flow", flow)
+                            // Vision flow is only valid over raw TCP.
+                            val raw = server.network.isBlank() ||
+                                server.network.equals("tcp", true) ||
+                                server.network.equals("raw", true)
+                            if (raw && server.security.equals("reality", true)) {
+                                put("flow", "xtls-rprx-vision")
+                            }
                         }))
                     }))
                 })
@@ -192,22 +225,72 @@ object XrayConfigGenerator {
                         put("port", server.port)
                         put("method", server.fingerprint.ifBlank { "chacha20-ietf-poly1305" })
                         put("password", server.uuid)
+                        put("uot", false)
                         put("level", 8)
                     }))
                 })
             }
-            else -> {
-                out.put("protocol", "freedom")
-                out.put("settings", JSONObject())
-                return out
+            "socks", "socks5" -> {
+                out.put("protocol", "socks")
+                out.put("settings", JSONObject().apply {
+                    put("servers", JSONArray().put(JSONObject().apply {
+                        put("address", server.server)
+                        put("port", server.port)
+                        if (server.host.isNotBlank()) {
+                            put("users", JSONArray().put(JSONObject().apply {
+                                put("user", server.host)
+                                put("pass", server.uuid)
+                                put("level", 8)
+                            }))
+                        }
+                    }))
+                })
             }
+            "http", "https" -> {
+                out.put("protocol", "http")
+                out.put("settings", JSONObject().apply {
+                    put("servers", JSONArray().put(JSONObject().apply {
+                        put("address", server.server)
+                        put("port", server.port)
+                        if (server.host.isNotBlank()) {
+                            put("users", JSONArray().put(JSONObject().apply {
+                                put("user", server.host)
+                                put("pass", server.uuid)
+                            }))
+                        }
+                    }))
+                })
+            }
+            "wireguard", "wg" -> {
+                needsStream = false
+                out.put("protocol", "wireguard")
+                out.put("settings", JSONObject().apply {
+                    put("secretKey", server.uuid)
+                    put("address", JSONArray().apply {
+                        val addr = server.path.ifBlank { "172.16.0.2/32" }
+                        addr.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { put(it) }
+                    })
+                    put("peers", JSONArray().put(JSONObject().apply {
+                        put("endpoint", server.server + ":" + server.port)
+                        put("publicKey", server.publicKey)
+                        if (server.shortId.isNotBlank()) put("preSharedKey", server.shortId)
+                        put("allowedIPs", JSONArray().put("0.0.0.0/0").put("::/0"))
+                    }))
+                    put("mtu", 1408)
+                })
+            }
+            else -> throw IllegalArgumentException(
+                "Protocol '" + server.protocol + "' is not supported by the Xray core"
+            )
         }
 
-        out.put("streamSettings", buildStreamSettings(server))
-        out.put("mux", JSONObject().apply {
-            put("enabled", false)
-            put("concurrency", -1)
-        })
+        if (needsStream) {
+            out.put("streamSettings", buildStreamSettings(server))
+            out.put("mux", JSONObject().apply {
+                put("enabled", false)
+                put("concurrency", -1)
+            })
+        }
         return out
     }
 
@@ -215,7 +298,16 @@ object XrayConfigGenerator {
         val stream = JSONObject()
         val network = server.network.ifBlank { "tcp" }.lowercase()
         val security = server.security.lowercase()
-        stream.put("network", if (network == "h2") "http" else network)
+        stream.put(
+            "network",
+            when (network) {
+                "h2", "h2c" -> "http"
+                "raw" -> "tcp"
+                "splithttp" -> "xhttp"
+                "quic" -> "tcp" // Xray has no bare QUIC transport for these protocols
+                else -> network
+            }
+        )
 
         when (security) {
             "reality" -> {
@@ -229,7 +321,7 @@ object XrayConfigGenerator {
                     put("show", false)
                 })
             }
-            "tls" -> {
+            "tls", "xtls" -> {
                 stream.put("security", "tls")
                 stream.put("tlsSettings", JSONObject().apply {
                     put("serverName", server.sni.ifBlank { server.host.ifBlank { server.server } })
@@ -244,7 +336,7 @@ object XrayConfigGenerator {
         }
 
         when (network) {
-            "ws" -> stream.put("wsSettings", JSONObject().apply {
+            "ws", "websocket" -> stream.put("wsSettings", JSONObject().apply {
                 put("path", server.path.ifBlank { "/" })
                 if (server.host.isNotBlank()) {
                     put("headers", JSONObject().apply { put("Host", server.host) })
@@ -262,14 +354,16 @@ object XrayConfigGenerator {
             "grpc" -> stream.put("grpcSettings", JSONObject().apply {
                 put("serviceName", server.path.trim('/'))
                 put("multiMode", false)
+                put("idle_timeout", 60)
+                put("health_check_timeout", 20)
             })
-            "h2", "http" -> stream.put("httpSettings", JSONObject().apply {
+            "h2", "h2c", "http" -> stream.put("httpSettings", JSONObject().apply {
                 put("path", server.path.ifBlank { "/" })
                 if (server.host.isNotBlank()) {
                     put("host", JSONArray().put(server.host))
                 }
             })
-            "tcp" -> {
+            "tcp", "raw", "" -> {
                 if (server.host.isNotBlank() && server.path.isNotBlank()) {
                     stream.put("tcpSettings", JSONObject().apply {
                         put("header", JSONObject().apply {
