@@ -15,10 +15,13 @@ import org.json.JSONObject
  *
  * Everything below therefore uses the modern shapes:
  *  - DNS servers are typed objects (`type` + `server`), never address strings
+ *  - `dns-direct` carries NO detour. A detour pointing at a plain `direct`
+ *    outbound is rejected by 1.14 with "detour to an empty direct outbound
+ *    makes no sense", which aborts DNS start-up and therefore the whole core
+ *    before any outbound is dialled -- every protocol then fails.
  *  - DNS rules never use the removed `outbound` field; the proxy host is
  *    resolved through `route.default_domain_resolver`
- *  - `block` outbound is gone, rejection happens through route actions
- *  - sniffing and DNS hijacking are route actions, not inbound booleans
+ *  - route rules use `action: "route"`; sniffing and DNS hijacking are actions
  *  - the tun inbound uses the `address` array instead of `inet4_address`
  *  - WireGuard is an `endpoint` with a `peers` array, not an outbound
  */
@@ -125,27 +128,97 @@ object SingBoxConfigGenerator {
 
     // ------------------------------------------------------------------ dns
 
+    private fun dnsHostOf(url: String): String =
+        url.substringAfter("://").substringBefore("/").substringBefore("?")
+
+    private fun dnsPathOf(url: String): String? {
+        val afterHost = url.substringAfter("://").substringAfter("/", "")
+        return if (afterHost.isBlank()) null else "/" + afterHost.substringBefore("?")
+    }
+
+    /**
+     * Accepts any of these user inputs and emits a valid 1.14 DNS server:
+     *   1.1.1.1                    -> udp
+     *   udp://1.1.1.1              -> udp
+     *   tls://1.1.1.1              -> tls (DoT)
+     *   quic://dns.adguard.com     -> quic (DoQ)
+     *   https://1.1.1.1/dns-query  -> https (DoH, path preserved)
+     *   h3://dns.google/dns-query  -> h3
+     *   local | system             -> the platform resolver
+     */
+    private fun dnsServerObject(tag: String, raw: String, detour: String?): JSONObject {
+        val value = raw.trim()
+        val obj = JSONObject().put("tag", tag)
+
+        when {
+            value.isBlank() -> {
+                obj.put("type", "udp")
+                obj.put("server", "1.1.1.1")
+            }
+            value.equals("local", true) || value.equals("system", true) -> {
+                obj.put("type", "local")
+            }
+            value.startsWith("https://", true) -> {
+                obj.put("type", "https")
+                obj.put("server", dnsHostOf(value))
+                dnsPathOf(value)?.let { obj.put("path", it) }
+            }
+            value.startsWith("h3://", true) -> {
+                obj.put("type", "h3")
+                obj.put("server", dnsHostOf(value))
+                dnsPathOf(value)?.let { obj.put("path", it) }
+            }
+            value.startsWith("quic://", true) -> {
+                obj.put("type", "quic")
+                obj.put("server", dnsHostOf(value))
+            }
+            value.startsWith("tls://", true) -> {
+                obj.put("type", "tls")
+                obj.put("server", dnsHostOf(value))
+            }
+            value.startsWith("udp://", true) || value.startsWith("dns://", true) -> {
+                obj.put("type", "udp")
+                obj.put("server", dnsHostOf(value))
+            }
+            else -> {
+                obj.put("type", "udp")
+                obj.put("server", value)
+            }
+        }
+
+        // Only a remote resolver may take a detour, and only towards a real
+        // proxy outbound. Never towards `direct`: 1.14 rejects that outright.
+        if (!detour.isNullOrBlank() && obj.optString("type") != "local") {
+            obj.put("detour", detour)
+        }
+        return obj
+    }
+
     private fun buildDns(dnsServer: String, bypassIran: Boolean): JSONObject {
         val servers = JSONArray()
-        servers.put(JSONObject().apply {
-            put("type", "https")
-            put("tag", "dns-remote")
-            put("server", dnsServer.ifBlank { "1.1.1.1" })
-            put("detour", "proxy")
-        })
-        servers.put(JSONObject().apply {
-            put("type", "udp")
-            put("tag", "dns-direct")
-            put("server", "8.8.8.8")
-            put("detour", "direct")
-        })
+
+        // Remote resolver: whatever the user configured, tunnelled via the proxy.
+        servers.put(
+            dnsServerObject(
+                "dns-remote",
+                dnsServer.ifBlank { "https://1.1.1.1/dns-query" },
+                "proxy"
+            )
+        )
+
+        // Direct resolver: plain, no detour. Resolves the proxy's own hostname
+        // and any bypassed domain without looping through the tunnel.
+        servers.put(dnsServerObject("dns-direct", "local", null))
 
         val rules = JSONArray()
         // NOTE: do NOT add a `{"outbound": "any"}` rule here. That field was
         // deprecated in sing-box 1.12 and removed in 1.14: the whole config is
-        // rejected at decode time. The proxy server's own hostname is resolved
-        // by `route.default_domain_resolver` (dns-direct) instead.
+        // rejected at decode time.
         if (bypassIran) {
+            rules.put(JSONObject().apply {
+                put("rule_set", JSONArray().put("geosite-ir"))
+                put("server", "dns-direct")
+            })
             rules.put(JSONObject().apply {
                 put("domain_suffix", JSONArray().put(".ir"))
                 put("server", "dns-direct")
@@ -239,6 +312,31 @@ object SingBoxConfigGenerator {
 
     // ---------------------------------------------------------------- route
 
+    private fun buildRuleSets(enabled: Boolean): JSONArray? {
+        if (!enabled) return null
+        fun remote(tag: String, url: String) = JSONObject().apply {
+            put("type", "remote")
+            put("tag", tag)
+            put("format", "binary")
+            put("url", url)
+            put("download_detour", "proxy")
+            put("update_interval", "7d")
+        }
+        return JSONArray()
+            .put(
+                remote(
+                    "geosite-ir",
+                    "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs"
+                )
+            )
+            .put(
+                remote(
+                    "geoip-ir",
+                    "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs"
+                )
+            )
+    }
+
     private fun buildRoute(
         routingMode: RoutingMode,
         bypassLan: Boolean,
@@ -266,12 +364,19 @@ object SingBoxConfigGenerator {
                 if (bypassLan) {
                     rules.put(JSONObject().apply {
                         put("ip_is_private", true)
+                        put("action", "route")
                         put("outbound", "direct")
                     })
                 }
                 if (bypassIran) {
                     rules.put(JSONObject().apply {
+                        put("rule_set", JSONArray().put("geosite-ir").put("geoip-ir"))
+                        put("action", "route")
+                        put("outbound", "direct")
+                    })
+                    rules.put(JSONObject().apply {
                         put("domain_suffix", JSONArray().put(".ir"))
+                        put("action", "route")
                         put("outbound", "direct")
                     })
                 }
@@ -280,6 +385,7 @@ object SingBoxConfigGenerator {
 
         return JSONObject().apply {
             put("rules", rules)
+            buildRuleSets(bypassIran && routingMode == RoutingMode.RULE)?.let { put("rule_set", it) }
             put("final", if (routingMode == RoutingMode.DIRECT) "direct" else "proxy")
             put("auto_detect_interface", true)
             // Resolves outbound server domains (including the proxy's own host)
@@ -301,10 +407,19 @@ object SingBoxConfigGenerator {
         return if (arr.length() == 0) null else arr
     }
 
-    /** TLS block with sane, protocol independent defaults. */
+    /** Raw TCP means: no v2ray transport at all (tcp / raw / empty). */
+    private fun ServerEntity.isRawTcp(): Boolean =
+        network.isBlank() ||
+            network.equals("tcp", true) ||
+            network.equals("raw", true)
+
+    private fun ServerEntity.isTlsLike(): Boolean =
+        security.lowercase() in setOf("tls", "reality", "xtls")
+
+    /** TLS block with sane, protocol independent defaults. Null means no TLS. */
     private fun buildTls(server: ServerEntity, forceEnabled: Boolean = false): JSONObject? {
         val sec = server.security.lowercase()
-        val enabled = forceEnabled || sec == "tls" || sec == "reality" || sec == "xtls"
+        val enabled = forceEnabled || server.isTlsLike()
         if (!enabled) return null
 
         return JSONObject().apply {
@@ -385,11 +500,9 @@ object SingBoxConfigGenerator {
                 out.put("server", host)
                 out.put("server_port", port)
                 out.put("uuid", server.uuid)
-                // XTLS Vision only makes sense over raw TCP with REALITY/TLS.
-                val raw = server.network.isBlank() ||
-                    server.network.equals("tcp", true) ||
-                    server.network.equals("raw", true)
-                if (raw && server.security.equals("reality", true)) {
+                // XTLS Vision is only valid over raw TCP with TLS or REALITY.
+                // Over ws/grpc/httpupgrade, or without TLS, it must be omitted.
+                if (server.isRawTcp() && server.security.equals("reality", true)) {
                     out.put("flow", "xtls-rprx-vision")
                 }
                 out.put("packet_encoding", "xudp")
@@ -414,8 +527,11 @@ object SingBoxConfigGenerator {
                 out.put("server", host)
                 out.put("server_port", port)
                 out.put("password", server.uuid)
-                // Trojan is TLS by definition.
-                out.put("tls", buildTls(server, forceEnabled = true)!!)
+                // Trojan is TLS by definition, unless the panel explicitly
+                // publishes a plain (security=none) node.
+                if (!server.security.equals("none", true)) {
+                    out.put("tls", buildTls(server, forceEnabled = true)!!)
+                }
                 buildTransport(server)?.let { out.put("transport", it) }
             }
 
