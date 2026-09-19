@@ -55,6 +55,28 @@ jobs:
             unzip -q -o /tmp/libxray.zip -d /tmp/xray_out/
             find /tmp/xray_out/ -name "libXray.aar" -exec cp {} app/libs/libXray.aar \;
             rm -rf /tmp/libxray.zip /tmp/xray_out
+
+            echo "Deduplicating gomobile runtime classes from libXray.aar..."
+            python3 -c "
+            import zipfile, io, os
+            aar = 'app/libs/libXray.aar'
+            tmp = 'app/libs/libXray_clean.aar'
+            with zipfile.ZipFile(aar, 'r') as zin, zipfile.ZipFile(tmp, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == 'classes.jar':
+                        jin = zipfile.ZipFile(io.BytesIO(data), 'r')
+                        jout_buf = io.BytesIO()
+                        jout = zipfile.ZipFile(jout_buf, 'w', compression=zipfile.ZIP_DEFLATED)
+                        for jitem in jin.infolist():
+                            if not jitem.filename.startswith('go/'):
+                                jout.writestr(jitem, jin.read(jitem.filename))
+                        jout.close()
+                        data = jout_buf.getvalue()
+                    zout.writestr(item, data)
+            os.replace(tmp, aar)
+            print('Successfully deduplicated gomobile classes.')
+            "
           fi
           test -s app/libs/libXray.aar
           echo "Verified libXray.aar size: $(ls -lh app/libs/libXray.aar | awk '{print $5}')"
