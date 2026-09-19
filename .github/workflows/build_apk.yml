@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,73 +28,71 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # ------------------------------------------------------------------
-      # Native cores. Download prebuilt official AAR binaries
+      # Native cores are OPTIONAL. A failed download must never fail the
+      # build: the app falls back to the built-in Kotlin core.
       # ------------------------------------------------------------------
       - name: Fetch libbox.aar (sing-box core)
+        continue-on-error: true
         run: |
           mkdir -p app/libs
-          if [ -f "app/libs/libbox.aar" ] && [ $(wc -c < "app/libs/libbox.aar") -gt 10000000 ]; then
+          if [ -s app/libs/libbox.aar ]; then
             echo "libbox.aar already present"
-          else
-            echo "Downloading prebuilt libbox.aar (sing-box 1.14.x)..."
-            curl -fL --retry 5 --retry-delay 5 \
-              "https://github.com/Leadaxe/sing-box-lx/releases/download/v1.14.1-lx.8/libbox-1.14.1-lx.8.aar" \
-              -o app/libs/libbox.aar
+            exit 0
           fi
-          test -s app/libs/libbox.aar
-          echo "Verified libbox.aar size: $(ls -lh app/libs/libbox.aar | awk '{print $5}')"
+          echo "Downloading prebuilt libbox.aar..."
+          curl -fL --retry 5 --retry-delay 5 \
+            "https://github.com/Leadaxe/sing-box-lx/releases/download/v1.14.1-lx.8/libbox-1.14.1-lx.8.aar" \
+            -o app/libs/libbox.aar || rm -f app/libs/libbox.aar
+          if [ -s app/libs/libbox.aar ]; then
+            echo "Downloaded libbox.aar ($(stat -c%s app/libs/libbox.aar) bytes)"
+          else
+            echo "::warning::libbox.aar unavailable - building without the sing-box native core"
+          fi
 
       - name: Fetch libXray.aar (Xray-core)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p app/libs
-          if [ -f "app/libs/libXray.aar" ] && [ $(wc -c < "app/libs/libXray.aar") -gt 10000000 ]; then
+          if [ -s app/libs/libXray.aar ]; then
             echo "libXray.aar already present"
-          else
-            echo "Downloading prebuilt libXray.aar (Xray v26.x)..."
-            curl -fL --retry 5 --retry-delay 5 \
-              "https://github.com/XTLS/libXray/releases/download/v26.9.9/libxray-android.zip" \
-              -o /tmp/libxray.zip
-            unzip -q -o /tmp/libxray.zip -d /tmp/xray_out/
-            find /tmp/xray_out/ -name "libXray.aar" -exec cp {} app/libs/libXray.aar \;
-            rm -rf /tmp/libxray.zip /tmp/xray_out
-
-            echo "Deduplicating gomobile runtime classes from libXray.aar..."
-            python3 -c "
-            import zipfile, io, os
-            aar = 'app/libs/libXray.aar'
-            tmp = 'app/libs/libXray_clean.aar'
-            with zipfile.ZipFile(aar, 'r') as zin, zipfile.ZipFile(tmp, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
-                for item in zin.infolist():
-                    data = zin.read(item.filename)
-                    if item.filename == 'classes.jar':
-                        jin = zipfile.ZipFile(io.BytesIO(data), 'r')
-                        jout_buf = io.BytesIO()
-                        jout = zipfile.ZipFile(jout_buf, 'w', compression=zipfile.ZIP_DEFLATED)
-                        for jitem in jin.infolist():
-                            if not jitem.filename.startswith('go/'):
-                                jout.writestr(jitem, jin.read(jitem.filename))
-                        jout.close()
-                        data = jout_buf.getvalue()
-                    zout.writestr(item, data)
-            os.replace(tmp, aar)
-            print('Successfully deduplicated gomobile classes.')
-            "
+            exit 0
           fi
-          test -s app/libs/libXray.aar
-          echo "Verified libXray.aar size: $(ls -lh app/libs/libXray.aar | awk '{print $5}')"
+          url=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/XTLS/libXray/releases/latest \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((a['browser_download_url'] for a in d.get('assets',[]) if 'android' in a['name'].lower() and a['name'].endswith('.zip')), ''))")
+          if [ -z "$url" ]; then
+            echo "::warning::No Android asset in the latest libXray release - skipping Xray core"
+            exit 0
+          fi
+          echo "Downloading $url"
+          curl -fL --retry 5 --retry-delay 5 "$url" -o /tmp/libxray.zip || exit 0
+          rm -rf /tmp/xray_out
+          unzip -q -o /tmp/libxray.zip -d /tmp/xray_out
+          found=$(find /tmp/xray_out -name "*.aar" | head -n1)
+          if [ -z "$found" ]; then
+            echo "::warning::No .aar inside the libXray archive - skipping Xray core"
+            exit 0
+          fi
+          cp "$found" app/libs/libXray.aar
+          python3 .ci/strip_go_classes.py app/libs/libXray.aar
+          echo "Prepared libXray.aar ($(stat -c%s app/libs/libXray.aar) bytes)"
 
       - name: Report bundled cores
-        run: ls -lh app/libs
+        run: ls -lh app/libs || echo "no app/libs directory"
 
       - name: Ensure debug.keystore exists
         run: |
-          if [ ! -f "debug.keystore" ]; then
-            if [ -f "debug.keystore.base64" ]; then
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
               base64 -d debug.keystore.base64 > debug.keystore
               echo "Restored debug.keystore from base64"
             else
-              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-              echo "Generated new debug.keystore"
+              keytool -genkeypair -v -keystore debug.keystore -storepass android \
+                -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+                -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+              echo "Generated a fresh debug.keystore"
             fi
           fi
 
