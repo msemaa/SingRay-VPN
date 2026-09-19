@@ -48,8 +48,8 @@ interface ServerDao {
     @Update
     suspend fun updateServer(server: ServerEntity)
 
-    @Query("UPDATE servers SET lastPingMs = :pingMs, lastTestTimestamp = :timestamp WHERE id = :id")
-    suspend fun updatePing(id: Long, pingMs: Long, timestamp: Long)
+    @Query("UPDATE servers SET lastPingMs = :pingMs, lastTestTimestamp = :timestamp, isRealDelay = :isRealDelay WHERE id = :id")
+    suspend fun updatePing(id: Long, pingMs: Long, timestamp: Long, isRealDelay: Boolean = false)
 
     @Query("UPDATE servers SET isSelected = CASE WHEN id = :selectedId THEN 1 ELSE 0 END")
     suspend fun setSelectedServer(selectedId: Long)

@@ -134,6 +134,7 @@ fun MainAppContent(
 ) {
     val context = LocalContext.current
     var currentTab by remember { mutableIntStateOf(0) }
+    var diagnosticsInitialTab by remember { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
     val uiNotice by viewModel.uiNotice.collectAsStateWithLifecycle()
 
@@ -201,6 +202,10 @@ fun MainAppContent(
                     viewModel = viewModel,
                     onNavigateToServers = { currentTab = 1 },
                     onNavigateToRouting = { currentTab = 2 },
+                    onNavigateToConsole = {
+                        diagnosticsInitialTab = 1
+                        currentTab = 4
+                    },
                     onRequestConnect = {
                         viewModel.toggleConnection(onRequestVpnPermission)
                     }
@@ -208,7 +213,7 @@ fun MainAppContent(
                 1 -> ServersScreen(viewModel = viewModel)
                 2 -> RoutingScreen(viewModel = viewModel)
                 3 -> SubscriptionsScreen(viewModel = viewModel)
-                4 -> DiagnosticsScreen(viewModel = viewModel)
+                4 -> DiagnosticsScreen(viewModel = viewModel, initialTab = diagnosticsInitialTab)
             }
         }
     }

@@ -4,40 +4,28 @@ import android.content.Context
 import android.net.VpnService
 import com.example.data.entity.ServerEntity
 import com.example.service.SingRayVpnService
+import io.nekohasekai.libbox.CommandServer
+import io.nekohasekai.libbox.Libbox
+import io.nekohasekai.libbox.OverrideOptions
+import io.nekohasekai.libbox.SetupOptions
 import java.io.File
 
 /**
- * Native sing-box engine (libbox.aar, produced by `make lib_android` in the
- * sing-box repository, package `io.nekohasekai.libbox`).
+ * Native sing-box engine (libbox.aar, io.nekohasekai.libbox).
  *
- * Everything is called through reflection so the app keeps compiling and
- * running when the .aar is not bundled yet.
- *
- * Expected native surface (sing-box 1.10+/1.11+ libbox):
- *   Libbox.setup(basePath, workingPath, tempPath, isTVOS)
- *   Libbox.newService(configJson, platformInterface) -> BoxService
- *   BoxService.start() / BoxService.close()
- *   Libbox.version()
+ * Implements concrete bindings to Libbox and CommandServer.
  */
 object SingBoxEngine : CoreEngine {
 
     override val type = CoreType.SING_BOX
 
-    private const val LIBBOX_CLASS = "io.nekohasekai.libbox.Libbox"
-
-    private var boxService: Any? = null
+    private var commandServer: CommandServer? = null
     private var initialized = false
 
-    private fun libboxClass(): Class<*>? = try {
-        Class.forName(LIBBOX_CLASS)
-    } catch (_: Throwable) {
-        null
-    }
-
-    override fun isAvailable(): Boolean = libboxClass() != null
+    override fun isAvailable(): Boolean = true
 
     override fun version(): String? = try {
-        libboxClass()?.getMethod("version")?.invoke(null) as? String
+        Libbox.version()
     } catch (_: Throwable) {
         null
     }
@@ -55,7 +43,6 @@ object SingBoxEngine : CoreEngine {
 
     private fun setup(context: Context) {
         if (initialized) return
-        val cls = libboxClass() ?: return
         val base = context.filesDir.absolutePath
         val workingDir = File(context.filesDir, "singbox").apply { mkdirs() }
         val working = workingDir.absolutePath
@@ -70,15 +57,15 @@ object SingBoxEngine : CoreEngine {
             }
         }
         val temp = context.cacheDir.absolutePath
+
         try {
-            cls.getMethod(
-                "setup",
-                String::class.java, String::class.java, String::class.java, Boolean::class.javaPrimitiveType
-            ).invoke(null, base, working, temp, false)
-        } catch (_: NoSuchMethodException) {
-            // Older libbox signature without the isTVOS flag.
-            cls.getMethod("setup", String::class.java, String::class.java, String::class.java)
-                .invoke(null, base, working, temp)
+            val opts = SetupOptions()
+            opts.basePath = base
+            opts.workingPath = working
+            opts.tempPath = temp
+            Libbox.setup(opts)
+        } catch (e: Throwable) {
+            SingRayVpnService.log("WARN", "SING-BOX", "Setup notice: ${e.message}")
         }
         initialized = true
     }
@@ -90,18 +77,21 @@ object SingBoxEngine : CoreEngine {
         configJson: String,
         tunFd: Int?
     ): CoreStartResult {
-        val cls = libboxClass()
-            ?: return CoreStartResult(false, type, "libbox.aar is not bundled (see app/libs/README.md)")
         return try {
             setup(context)
             val platform = SingBoxPlatform(vpnService, tunFd)
-            val newService = cls.methods.firstOrNull { it.name == "newService" && it.parameterTypes.size == 2 }
-                ?: return CoreStartResult(false, type, "libbox.newService() not found in this .aar")
-            val service = newService.invoke(null, configJson, platform.proxy())
-            service.javaClass.getMethod("start").invoke(service)
-            boxService = service
-            SingRayVpnService.log("INFO", "SING-BOX", "Started (${version() ?: "unknown version"})")
-            CoreStartResult(true, type, "sing-box started")
+            val handler = SingBoxCommandHandler()
+
+            stop()
+
+            val serverInstance = CommandServer(handler, platform)
+            serverInstance.start()
+            serverInstance.startOrReloadService(configJson, OverrideOptions())
+            commandServer = serverInstance
+
+            val ver = version() ?: "1.14.1"
+            SingRayVpnService.log("INFO", "SING-BOX", "Started ($ver)")
+            CoreStartResult(true, type, "sing-box started ($ver)")
         } catch (e: Throwable) {
             val cause = e.cause?.message ?: e.message ?: e.javaClass.simpleName
             CoreStartResult(false, type, "sing-box failed: $cause")
@@ -109,13 +99,14 @@ object SingBoxEngine : CoreEngine {
     }
 
     override fun stop() {
-        val service = boxService ?: return
+        val s = commandServer ?: return
         try {
-            service.javaClass.getMethod("close").invoke(service)
-        } catch (_: Throwable) {
-            try { service.javaClass.getMethod("stop").invoke(service) } catch (_: Throwable) {}
-        }
-        boxService = null
+            s.closeService()
+        } catch (_: Throwable) {}
+        try {
+            s.close()
+        } catch (_: Throwable) {}
+        commandServer = null
         SingRayVpnService.log("INFO", "SING-BOX", "Stopped")
     }
 }

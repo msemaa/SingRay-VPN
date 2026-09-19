@@ -131,6 +131,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiNotice.value = null
     }
 
+    fun dismissLastError() {
+        SingRayVpnService.clearError()
+    }
+
     fun toggleDarkTheme() {
         _isDarkTheme.value = !_isDarkTheme.value
     }

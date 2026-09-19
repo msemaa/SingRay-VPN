@@ -2,72 +2,110 @@ package com.example.core.engine
 
 import android.net.VpnService
 import com.example.service.SingRayVpnService
-import java.lang.reflect.InvocationHandler
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
+import io.nekohasekai.libbox.BridgeOptions
+import io.nekohasekai.libbox.BridgeSession
+import io.nekohasekai.libbox.CommandServerHandler
+import io.nekohasekai.libbox.ConnectionOwner
+import io.nekohasekai.libbox.InterfaceUpdateListener
+import io.nekohasekai.libbox.LocalDNSTransport
+import io.nekohasekai.libbox.NeighborUpdateListener
+import io.nekohasekai.libbox.NetworkInterfaceIterator
+import io.nekohasekai.libbox.Notification
+import io.nekohasekai.libbox.PlatformInterface
+import io.nekohasekai.libbox.PlatformUser
+import io.nekohasekai.libbox.ShellSession
+import io.nekohasekai.libbox.StringIterator
+import io.nekohasekai.libbox.SystemProxyStatus
+import io.nekohasekai.libbox.TunOptions
+import io.nekohasekai.libbox.WIFIState
 
 /**
- * Dynamic implementation of libbox's `PlatformInterface`.
+ * Concrete implementation of libbox's [PlatformInterface].
  *
- * The interface type only exists when libbox.aar is bundled, so it is
- * implemented with a [Proxy] created at runtime. Unknown methods get safe
- * default answers, which keeps the app working across libbox revisions.
+ * Provides Android VPN integration, interface protection to avoid routing loops,
+ * and TUN file descriptor management.
  */
 class SingBoxPlatform(
     private val vpnService: VpnService?,
     private val tunFd: Int?
-) {
+) : PlatformInterface {
 
-    fun proxy(): Any? {
-        val iface = try {
-            Class.forName("io.nekohasekai.libbox.PlatformInterface")
-        } catch (_: Throwable) {
-            return null
-        }
-
-        val handler = InvocationHandler { _, method: Method, args: Array<out Any?>? ->
-            handle(method, args)
-        }
-        return Proxy.newProxyInstance(iface.classLoader, arrayOf(iface), handler)
+    override fun autoDetectInterfaceControl(fd: Int) {
+        vpnService?.protect(fd)
     }
 
-    private fun handle(method: Method, args: Array<out Any?>?): Any? = when (method.name) {
-        // sing-box asks the platform for the already-established TUN fd.
-        "openTun" -> tunFd?.toLong() ?: 0L
-
-        // Keep sockets outside of the tunnel to avoid routing loops.
-        "autoDetectInterfaceControl" -> {
-            val fd = (args?.getOrNull(0) as? Number)?.toInt()
-            if (fd != null) vpnService?.protect(fd)
-            null
+    override fun openTun(options: TunOptions?): Int {
+        if (tunFd != null && tunFd > 0) {
+            return tunFd
         }
-
-        "usePlatformAutoDetectInterfaceControl" -> true
-        "useProcFS", "usePlatformDefaultInterfaceMonitor", "includeAllNetworks" -> false
-        "underNetworkExtension", "isExpensive", "isConstrained" -> false
-
-        "writeLog" -> {
-            val line = args?.getOrNull(0)?.toString().orEmpty()
-            if (line.isNotBlank()) SingRayVpnService.log("INFO", "SING-BOX", line)
-            null
-        }
-
-        "findConnectionOwner" -> -1
-        "packageNameByUid", "uidByPackageName" -> defaultFor(method)
-        "readWIFIState", "getInterfaces", "startDefaultInterfaceMonitor",
-        "closeDefaultInterfaceMonitor", "clearDNSCache", "sendNotification",
-        "updateRouteOptions", "resetNetwork" -> defaultFor(method)
-
-        else -> defaultFor(method)
+        val vpn = vpnService ?: return 0
+        val builder = vpn.Builder()
+        val mtu = options?.mtu ?: 1500
+        builder.setMtu(mtu)
+        builder.addAddress("172.19.0.1", 30)
+        builder.addRoute("0.0.0.0", 0)
+        builder.setSession("SingRay")
+        return builder.establish()?.detachFd() ?: 0
     }
 
-    private fun defaultFor(method: Method): Any? = when (method.returnType) {
-        Boolean::class.javaPrimitiveType -> false
-        Int::class.javaPrimitiveType -> 0
-        Long::class.javaPrimitiveType -> 0L
-        Double::class.javaPrimitiveType -> 0.0
-        Float::class.javaPrimitiveType -> 0f
-        String::class.java -> ""
-        else -> null
+    override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
+    override fun useProcFS(): Boolean = false
+    override fun includeAllNetworks(): Boolean = false
+    override fun underNetworkExtension(): Boolean = false
+    override fun usePlatformBridge(): Boolean = false
+    override fun usePlatformShell(): Boolean = false
+
+    override fun clearDNSCache() {}
+    override fun cancelNotification(tag: String?, id: Int) {}
+    override fun checkPlatformShell() {}
+    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {}
+    override fun closeNeighborMonitor(listener: NeighborUpdateListener?) {}
+    override fun createBridge(options: BridgeOptions?): BridgeSession? = null
+    override fun findConnectionOwner(
+        ipProtocol: Int,
+        sourceAddress: String?,
+        sourcePort: Int,
+        destinationAddress: String?,
+        destinationPort: Int
+    ): ConnectionOwner? = null
+
+    override fun getInterfaces(): NetworkInterfaceIterator? = null
+    override fun localDNSTransport(): LocalDNSTransport? = null
+    override fun lookupSFTPServer(): String = ""
+    override fun lookupUser(name: String?): PlatformUser? = null
+    override fun openShellSession(
+        user: PlatformUser?,
+        command: String?,
+        args: StringIterator?,
+        dir: String?,
+        uid: Int,
+        gid: Int
+    ): ShellSession? = null
+
+    override fun readSystemSSHHostKey(): String = ""
+    override fun readWIFIState(): WIFIState? = null
+    override fun registerMyInterface(name: String?) {}
+    override fun sendNotification(notification: Notification?) {}
+    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {}
+    override fun startNeighborMonitor(listener: NeighborUpdateListener?) {}
+    override fun tailscaleHostname(): String = ""
+}
+
+class SingBoxCommandHandler : CommandServerHandler {
+    override fun connectSSHAgent(): Int = -1
+    override fun getSystemProxyStatus(): SystemProxyStatus? = null
+    override fun serviceReload() {
+        SingRayVpnService.log("INFO", "SING-BOX", "Reload requested")
+    }
+    override fun serviceStop() {
+        SingRayVpnService.log("INFO", "SING-BOX", "Stop requested")
+    }
+    override fun setSystemProxyEnabled(enabled: Boolean) {}
+    override fun triggerNativeCrash() {}
+    override fun writeDebugMessage(message: String?) {
+        if (!message.isNullOrBlank()) {
+            SingRayVpnService.log("DEBUG", "SING-BOX", message)
+        }
     }
 }
+

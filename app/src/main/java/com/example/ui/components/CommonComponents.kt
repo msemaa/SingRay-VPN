@@ -46,11 +46,16 @@ fun ProtocolBadge(protocol: ProxyProtocol, modifier: Modifier = Modifier) {
 @Composable
 fun LatencyBadge(
     latencyMs: Long,
+    isRealDelay: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val (bgColor, textColor, text) = when {
         latencyMs == -1L -> Triple(SlateDim.copy(alpha = 0.2f), SlateDim, "Untested")
         latencyMs == -2L -> Triple(RubyCritical.copy(alpha = 0.2f), RubyCritical, "Timeout")
+        !isRealDelay -> {
+            // TCP-only ping: muted color and explicit "TCP <n> ms"
+            Triple(SlateDim.copy(alpha = 0.25f), Color(0xFF90A4AE), "TCP $latencyMs ms")
+        }
         latencyMs < 120 -> Triple(MintTelemetry.copy(alpha = 0.2f), MintTelemetry, "$latencyMs ms")
         latencyMs < 300 -> Triple(CyanNeon.copy(alpha = 0.2f), CyanNeon, "$latencyMs ms")
         latencyMs < 500 -> Triple(AmberWarning.copy(alpha = 0.2f), AmberWarning, "$latencyMs ms")

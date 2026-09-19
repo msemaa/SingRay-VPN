@@ -94,10 +94,12 @@ fun DashboardScreen(
     viewModel: MainViewModel,
     onNavigateToServers: () -> Unit,
     onNavigateToRouting: () -> Unit,
+    onNavigateToConsole: () -> Unit = {},
     onRequestConnect: () -> Unit = { viewModel.connectOrDisconnect() }
 ) {
     val context = LocalContext.current
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
+    val lastError by viewModel.lastError.collectAsStateWithLifecycle()
     val selectedServer by viewModel.selectedServer.collectAsStateWithLifecycle()
     val trafficStats by viewModel.trafficStats.collectAsStateWithLifecycle()
     val smartPingEnabled by viewModel.smartPingEnabled.collectAsStateWithLifecycle()
@@ -258,7 +260,114 @@ fun DashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Connection Error Card (dismissible, showing exact message, chosen core, and View Logs action)
+        AnimatedVisibility(visible = !lastError.isNullOrBlank()) {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF2C1014)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE53935).copy(alpha = 0.6f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .testTag("connection_error_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Error",
+                                tint = Color(0xFFEF5350),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Connection Failed",
+                                color = Color(0xFFEF5350),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.dismissLastError() },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss",
+                                tint = Color(0xFFEF5350).copy(alpha = 0.8f),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = lastError.orEmpty(),
+                        color = Color(0xFFECEFF1),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                viewModel.dismissLastError()
+                                onNavigateToConsole()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A5F)),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp).testTag("view_logs_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Code,
+                                contentDescription = null,
+                                tint = Color(0xFF80D8FF),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "View Logs",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF80D8FF)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { viewModel.dismissLastError() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF37474F)),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(32.dp).testTag("dismiss_error_button")
+                        ) {
+                            Text(
+                                text = "Dismiss",
+                                fontSize = 12.sp,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Center Precision Telemetry Dial
         Box(
@@ -1138,7 +1247,7 @@ fun DashboardScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            LatencyBadge(latencyMs = server.lastPingMs)
+                            LatencyBadge(latencyMs = server.lastPingMs, isRealDelay = server.isRealDelay)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (server.security.isNotBlank() && server.security != "none") "• ${server.security.uppercase()}" else "",
@@ -1153,7 +1262,7 @@ fun DashboardScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(AppTheme.colors.surfaceVariant)
-                                .clickable { viewModel.pingSingleServer(server) }
+                                .clickable { viewModel.realDelayTest(server) }
                                 .padding(horizontal = 10.dp, vertical = 5.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {

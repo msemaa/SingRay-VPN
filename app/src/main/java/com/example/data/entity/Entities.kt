@@ -27,6 +27,7 @@ data class ServerEntity(
     val subscriptionId: Long? = null,
     val lastPingMs: Long = -1L, // -1 untested, -2 timeout, >0 ms
     val lastTestTimestamp: Long = 0L,
+    val isRealDelay: Boolean = false,
     val rawUri: String = "",
     val isFavorite: Boolean = false,
     val isSelected: Boolean = false

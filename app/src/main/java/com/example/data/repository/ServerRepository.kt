@@ -109,13 +109,13 @@ class ServerRepository(private val context: Context) {
     suspend fun testServerPing(server: ServerEntity): Long {
         val ping = PingEngine.testSocketPing(server.server, server.port)
         val now = System.currentTimeMillis()
-        serverDao.updatePing(server.id, ping, now)
+        serverDao.updatePing(server.id, ping, now, isRealDelay = false)
         return ping
     }
 
-    /** Stores the result of a real end-to-end tunnel test. */
+    /** Stores the result of a real end-to-end tunnel test (generate_204 probe). */
     suspend fun setRealDelay(serverId: Long, latencyMs: Long) {
-        serverDao.updatePing(serverId, latencyMs, System.currentTimeMillis())
+        serverDao.updatePing(serverId, latencyMs, System.currentTimeMillis(), isRealDelay = true)
     }
 
     suspend fun testAllPings(

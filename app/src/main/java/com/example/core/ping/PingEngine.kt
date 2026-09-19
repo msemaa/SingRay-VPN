@@ -72,12 +72,12 @@ object PingEngine {
                     testSocketPing(server.server, server.port)
                 }
                 val now = System.currentTimeMillis()
-                serverDao.updatePing(server.id, ping, now)
+                serverDao.updatePing(server.id, ping, now, isRealDelay = false)
                 synchronized(this@PingEngine) {
                     completedCount++
                     onProgress(completedCount, total)
                 }
-                server.copy(lastPingMs = ping, lastTestTimestamp = now)
+                server.copy(lastPingMs = ping, lastTestTimestamp = now, isRealDelay = false)
             }
         }
 

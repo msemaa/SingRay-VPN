@@ -163,7 +163,9 @@ class SingRayVpnService : VpnService() {
             // ---------------------------------------------------------------
             // 0. Native cores first: sing-box / Xray, auto-selected per config.
             // ---------------------------------------------------------------
-            val chosen = CoreManager.pickCore(server, corePreference)
+            val (chosen, pickReason) = CoreManager.pickCoreWithReason(server, corePreference)
+            log("INFO", "CORE", "Target core: ${chosen.title} ($pickReason)")
+            var nativeFailureReason: String? = null
             if (chosen == CoreType.SING_BOX || chosen == CoreType.XRAY) {
                 // sing-box can own the TUN itself; Xray needs the local proxy.
                 val fd: Int? = if (chosen == CoreType.SING_BOX && SingBoxEngine.isAvailable()) {
@@ -195,7 +197,7 @@ class SingRayVpnService : VpnService() {
                     // Verify through the core's own SOCKS inbound.
                     val ok = ConnectivityTester.socksProbe("127.0.0.1", SOCKS_PORT)
                     if (!ok.success) {
-                        fail("${started.core.title} started but the tunnel does not pass data: ${ok.message}")
+                        fail("${started.core.title} connected, but traffic probe failed: ${ok.message} [Selection: $pickReason]")
                         return@launch
                     }
                     log("INFO", "TEST", "Tunnel verified through ${started.core.title} in ${ok.latencyMs} ms")
@@ -206,6 +208,7 @@ class SingRayVpnService : VpnService() {
                 }
 
                 closeTun()
+                nativeFailureReason = started.message
                 log("WARN", "CORE", started.message)
             }
 
@@ -216,10 +219,11 @@ class SingRayVpnService : VpnService() {
             val outbound = try {
                 OutboundFactory.create(server, this@SingRayVpnService)
             } catch (e: UnsupportedConfigException) {
-                fail(e.message ?: "Unsupported config")
+                val prefix = if (nativeFailureReason != null) "$nativeFailureReason. " else ""
+                fail("${prefix}Built-in core does not support ${server.protocol.uppercase()}${if (server.security.isNotBlank()) "/${server.security}" else ""}: ${e.message} [Selection: $pickReason]")
                 return@launch
             } catch (e: Exception) {
-                fail("Failed to build outbound: ${e.message}")
+                fail("Failed to build outbound: ${e.message} [Selection: $pickReason]")
                 return@launch
             }
             activeOutbound = outbound
@@ -228,7 +232,8 @@ class SingRayVpnService : VpnService() {
             log("INFO", "TEST", "Verifying tunnel with a real HTTP request...")
             val probe = ConnectivityTester.realDelay(server, this@SingRayVpnService)
             if (!probe.success) {
-                fail("Handshake failed: ${probe.message}")
+                val prefix = if (nativeFailureReason != null) "$nativeFailureReason. " else ""
+                fail("${prefix}Tunnel handshake failed: ${probe.message} [Selection: $pickReason]")
                 return@launch
             }
             log("INFO", "TEST", "Tunnel verified in ${probe.latencyMs} ms -> ${probe.message}")

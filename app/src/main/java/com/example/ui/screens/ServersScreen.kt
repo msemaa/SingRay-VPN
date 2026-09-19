@@ -205,7 +205,7 @@ fun ServersScreen(
                     Spacer(modifier = Modifier.width(8.dp))
 
                     Button(
-                        onClick = { viewModel.testAllServersPing() },
+                        onClick = { viewModel.realDelayTestAll() },
                         enabled = !batchPingState.isTesting,
                         colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.accentCyan),
                         shape = RoundedCornerShape(8.dp),
@@ -439,7 +439,7 @@ fun ServersScreen(
                             server = server,
                             isSelected = isCurrent,
                             onSelect = { viewModel.selectServer(server) },
-                            onTestPing = { viewModel.pingSingleServer(server) },
+                            onTestPing = { viewModel.realDelayTest(server) },
                             onDelete = { viewModel.deleteServer(server) },
                             onCopyLink = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -602,7 +602,7 @@ fun ServerCardItem(
 
             // Latency badge and ping button
             Row(verticalAlignment = Alignment.CenterVertically) {
-                LatencyBadge(latencyMs = server.lastPingMs)
+                LatencyBadge(latencyMs = server.lastPingMs, isRealDelay = server.isRealDelay)
 
                 Spacer(modifier = Modifier.width(4.dp))
 

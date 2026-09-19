@@ -42,6 +42,7 @@ import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -67,9 +68,9 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun DiagnosticsScreen(viewModel: MainViewModel) {
+fun DiagnosticsScreen(viewModel: MainViewModel, initialTab: Int = 0) {
     val context = LocalContext.current
-    var selectedTab by remember { mutableStateOf(0) }
+    var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab) }
     val logs: List<CoreLog> by viewModel.coreLogs.collectAsStateWithLifecycle()
     val diagnosticResult: PingDiagnosticResult? by viewModel.diagnosticResult.collectAsStateWithLifecycle()
     val isTestingDiag: Boolean by viewModel.isTestingDiagnostic.collectAsStateWithLifecycle()

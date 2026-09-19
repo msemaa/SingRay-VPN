@@ -11,7 +11,7 @@ import com.example.data.entity.SubscriptionEntity
 
 @Database(
     entities = [ServerEntity::class, SubscriptionEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class SingRayDatabase : RoomDatabase() {
