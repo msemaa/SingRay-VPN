@@ -22,10 +22,11 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: false
 
       # ------------------------------------------------------------------
-      # Native cores. The Go cores ship as .aar files (>90MB),
-      # so they are downloaded here by CI so the resulting APK bundles both cores.
+      # Native cores. Download prebuilt official AAR binaries
       # ------------------------------------------------------------------
       - name: Fetch libbox.aar (sing-box core)
         run: |
@@ -76,7 +77,7 @@ jobs:
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --stacktrace
+          ./gradlew :app:assembleDebug --no-daemon --no-configuration-cache --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -84,4 +85,3 @@ jobs:
           name: singray-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-
