@@ -1,0 +1,12 @@
+bin/
+obj/
+publish/
+dist/
+obf-in/
+obf-out/
+*.user
+*.suo
+*.pdb
+src/SingRay.Win/cores/*.exe
+src/SingRay.Win/cores/*.dll
+src/SingRay.Win/cores/*.dat

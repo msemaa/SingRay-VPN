@@ -1,0 +1,212 @@
+name: Build SingRay for Windows
+
+on:
+  push:
+    branches: [ main, master, windows-client ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SING_BOX_TAG: v1.14.1
+  XRAY_TAG: v25.9.11
+  WINTUN_VERSION: 0.14.1
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            arch: x64
+            singbox: windows-amd64
+            xray: windows-64
+            wintun: amd64
+          - rid: win-x86
+            arch: x86
+            singbox: windows-386
+            xray: windows-32
+            wintun: x86
+          - rid: win-arm64
+            arch: arm64
+            singbox: windows-arm64
+            xray: windows-arm64-v8a
+            wintun: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download sing-box, Xray and Wintun
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cores = "windows/src/SingRay.Win/cores"
+          New-Item -ItemType Directory -Force -Path $cores | Out-Null
+          $headers = @{ 'User-Agent' = 'SingRay-CI'; 'Authorization' = "Bearer $env:GH_TOKEN" }
+
+          function Get-Release($repo, $tag) {
+            # Prefer the pinned tag so builds are reproducible; fall back to the
+            # latest release if the tag was ever retracted or renamed.
+            try   { return Invoke-RestMethod -Headers $headers "https://api.github.com/repos/$repo/releases/tags/$tag" }
+            catch { Write-Warning "$repo $tag unavailable, falling back to latest"
+                    return Invoke-RestMethod -Headers $headers "https://api.github.com/repos/$repo/releases/latest" }
+          }
+
+          function Save-Asset($url, $out) {
+            for ($i = 1; $i -le 3; $i++) {
+              try { Invoke-WebRequest -Headers $headers -Uri $url -OutFile $out; return }
+              catch { Write-Warning "attempt $i failed for $url"; Start-Sleep -Seconds (5 * $i) }
+            }
+            throw "could not download $url"
+          }
+
+          $sb = Get-Release 'SagerNet/sing-box' $env:SING_BOX_TAG
+          $sbAsset = $sb.assets | Where-Object { $_.name -like "*${{ matrix.singbox }}.zip" } | Select-Object -First 1
+          if (-not $sbAsset) { throw "sing-box asset for ${{ matrix.singbox }} not found in $($sb.tag_name)" }
+          Save-Asset $sbAsset.browser_download_url sb.zip
+          Expand-Archive sb.zip -DestinationPath sb -Force
+          Get-ChildItem sb -Recurse -Filter sing-box.exe | Select-Object -First 1 | ForEach-Object {
+            Copy-Item $_.FullName "$cores/sing-box.exe" -Force
+          }
+          "SING_BOX_RELEASE=$($sb.tag_name)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+          $xr = Get-Release 'XTLS/Xray-core' $env:XRAY_TAG
+          $xrAsset = $xr.assets | Where-Object { $_.name -like "Xray-${{ matrix.xray }}.zip" } | Select-Object -First 1
+          if (-not $xrAsset) { throw "Xray asset for ${{ matrix.xray }} not found in $($xr.tag_name)" }
+          Save-Asset $xrAsset.browser_download_url xr.zip
+          Expand-Archive xr.zip -DestinationPath xr -Force
+          Get-ChildItem xr -Recurse -Filter xray.exe | Select-Object -First 1 | ForEach-Object {
+            Copy-Item $_.FullName "$cores/xray.exe" -Force
+          }
+          Get-ChildItem xr -Recurse -Include geoip.dat,geosite.dat | ForEach-Object {
+            Copy-Item $_.FullName "$cores/" -Force
+          }
+          "XRAY_RELEASE=$($xr.tag_name)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+          # Wintun is required for TUN mode (system-wide routing).
+          Save-Asset "https://www.wintun.net/builds/wintun-$($env:WINTUN_VERSION).zip" wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wt -Force
+          $want = "${{ matrix.wintun }}"
+          $dll = Get-ChildItem wt -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match $want } | Select-Object -First 1
+          if (-not $dll) { throw "wintun.dll for $want not found" }
+          Copy-Item $dll.FullName "$cores/wintun.dll" -Force
+
+          Get-ChildItem $cores
+
+      # A client without cores cannot run a single protocol, so this must be a
+      # hard failure rather than a warning buried in the log.
+      - name: Verify bundled cores
+        shell: pwsh
+        run: |
+          $cores = "windows/src/SingRay.Win/cores"
+          $required = @('sing-box.exe', 'xray.exe', 'geoip.dat', 'geosite.dat', 'wintun.dll')
+          $missing = $required | Where-Object { -not (Test-Path "$cores/$_") -or (Get-Item "$cores/$_").Length -eq 0 }
+          "### Bundled cores (${{ matrix.arch }})" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "- sing-box $env:SING_BOX_RELEASE" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "- Xray $env:XRAY_RELEASE" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "- Wintun $env:WINTUN_VERSION" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($missing) {
+            Write-Error "Missing cores: $($missing -join ', ')"
+            exit 1
+          }
+
+      - name: Publish (self-contained, single file, no symbols)
+        shell: pwsh
+        run: |
+          dotnet publish windows/src/SingRay.Win/SingRay.Win.csproj `
+            -c Release -r ${{ matrix.rid }} --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=none -p:DebugSymbols=false `
+            -p:SatelliteResourceLanguages=en `
+            -o publish/${{ matrix.arch }}
+
+      - name: Verify published output
+        shell: pwsh
+        run: |
+          $exe = "publish/${{ matrix.arch }}/SingRay.exe"
+          if (-not (Test-Path $exe)) { Write-Error "SingRay.exe was not produced"; exit 1 }
+          foreach ($f in @('sing-box.exe', 'xray.exe', 'wintun.dll')) {
+            if (-not (Test-Path "publish/${{ matrix.arch }}/cores/$f")) {
+              Write-Error "cores/$f was not copied next to SingRay.exe"
+              exit 1
+            }
+          }
+
+      - name: Strip any leftover symbol files
+        shell: pwsh
+        run: |
+          Get-ChildItem publish/${{ matrix.arch }} -Recurse -Include *.pdb,*.xml | Remove-Item -Force -ErrorAction SilentlyContinue
+
+      - name: Sign binaries (optional)
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64)) {
+            Write-Host "No signing certificate configured - skipping."
+            exit 0
+          }
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if ($signtool) {
+            & $signtool.FullName sign /f cert.pfx /p $env:PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "publish/${{ matrix.arch }}/SingRay.exe"
+          } else {
+            Write-Warning "signtool.exe not found - skipping signing"
+          }
+          Remove-Item cert.pfx -Force -ErrorAction SilentlyContinue
+
+      - name: Build installer
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path windows/dist | Out-Null
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) {
+            Write-Warning "Inno Setup unavailable - portable zip only"
+            exit 0
+          }
+          $src = (Resolve-Path "publish/${{ matrix.arch }}").Path
+          & $iscc /DMyAppVersion=1.0.0 /DMyArch=${{ matrix.arch }} "/DSourceDir=$src" windows/installer/SingRay.iss
+
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path windows/dist | Out-Null
+          Compress-Archive -Path publish/${{ matrix.arch }}/* -DestinationPath windows/dist/SingRay-1.0.0-${{ matrix.arch }}-portable.zip -Force
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SingRay-Windows-${{ matrix.arch }}
+          path: windows/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: windows/dist/*
