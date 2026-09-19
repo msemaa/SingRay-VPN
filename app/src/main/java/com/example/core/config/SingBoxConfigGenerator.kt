@@ -11,12 +11,16 @@ import org.json.JSONObject
  * The legacy schema that older clients still emit was removed in sing-box
  * 1.14 and produces errors such as:
  *   `decode config: dns.servers[0]: legacy DNS server formats are deprecated`
+ *   `decode config: dns.rules[0]: json: unknown field "outbound"`
  *
  * Everything below therefore uses the modern shapes:
  *  - DNS servers are typed objects (`type` + `server`), never address strings
+ *  - DNS rules never use the removed `outbound` field; the proxy host is
+ *    resolved through `route.default_domain_resolver`
  *  - `block` outbound is gone, rejection happens through route actions
  *  - sniffing and DNS hijacking are route actions, not inbound booleans
  *  - the tun inbound uses the `address` array instead of `inet4_address`
+ *  - WireGuard is an `endpoint` with a `peers` array, not an outbound
  */
 object SingBoxConfigGenerator {
 
@@ -67,6 +71,10 @@ object SingBoxConfigGenerator {
         logLevel = "warn"
     ).toString()
 
+    /** True when this protocol is declared under `endpoints` instead of `outbounds`. */
+    private fun isEndpointProtocol(protocol: String): Boolean =
+        protocol.lowercase() in setOf("wireguard", "wg")
+
     // ----------------------------------------------------------------- root
 
     private fun buildRoot(
@@ -91,7 +99,18 @@ object SingBoxConfigGenerator {
 
         root.put("dns", buildDns(dnsServer, bypassIran))
         root.put("inbounds", buildInbounds(socksPort, httpPort, useTun, mtu))
-        root.put("outbounds", buildOutbounds(server))
+
+        if (isEndpointProtocol(server.protocol)) {
+            // sing-box 1.14 removed the legacy `wireguard` outbound.
+            root.put("endpoints", JSONArray().put(buildWireGuardEndpoint(server)))
+            root.put("outbounds", JSONArray().put(JSONObject().apply {
+                put("type", "direct")
+                put("tag", "direct")
+            }))
+        } else {
+            root.put("outbounds", buildOutbounds(server))
+        }
+
         root.put("route", buildRoute(routingMode, bypassLan, bypassIran))
 
         root.put("experimental", JSONObject().apply {
@@ -122,11 +141,10 @@ object SingBoxConfigGenerator {
         })
 
         val rules = JSONArray()
-        // Never resolve the proxy host itself through the proxy.
-        rules.put(JSONObject().apply {
-            put("outbound", "any")
-            put("server", "dns-direct")
-        })
+        // NOTE: do NOT add a `{"outbound": "any"}` rule here. That field was
+        // deprecated in sing-box 1.12 and removed in 1.14: the whole config is
+        // rejected at decode time. The proxy server's own hostname is resolved
+        // by `route.default_domain_resolver` (dns-direct) instead.
         if (bypassIran) {
             rules.put(JSONObject().apply {
                 put("domain_suffix", JSONArray().put(".ir"))
@@ -136,7 +154,7 @@ object SingBoxConfigGenerator {
 
         return JSONObject().apply {
             put("servers", servers)
-            put("rules", rules)
+            if (rules.length() > 0) put("rules", rules)
             put("final", "dns-remote")
             put("strategy", "prefer_ipv4")
             put("independent_cache", true)
@@ -168,7 +186,6 @@ object SingBoxConfigGenerator {
             inbounds.put(JSONObject().apply {
                 put("type", "tun")
                 put("tag", "tun-in")
-                put("interface_name", "singray-tun")
                 put("address", JSONArray().put("172.19.0.1/30"))
                 put("mtu", mtu)
                 put("auto_route", true)
@@ -189,6 +206,35 @@ object SingBoxConfigGenerator {
                 put("type", "direct")
                 put("tag", "direct")
             })
+    }
+
+    /**
+     * WireGuard in the modern endpoint form.
+     *
+     * Field packing used by this app:
+     *  uuid      -> private key
+     *  publicKey -> peer public key
+     *  shortId   -> pre-shared key (optional)
+     *  path      -> local addresses, comma separated
+     */
+    private fun buildWireGuardEndpoint(server: ServerEntity): JSONObject = JSONObject().apply {
+        put("type", "wireguard")
+        put("tag", "proxy")
+        put("system", false)
+        put("mtu", 1408)
+        put("address", JSONArray().apply {
+            val addr = server.path.ifBlank { "172.16.0.2/32" }
+            addr.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { put(it) }
+        })
+        put("private_key", server.uuid)
+        put("peers", JSONArray().put(JSONObject().apply {
+            put("address", server.server)
+            put("port", server.port)
+            put("public_key", server.publicKey)
+            if (server.shortId.isNotBlank()) put("pre_shared_key", server.shortId)
+            put("allowed_ips", JSONArray().put("0.0.0.0/0").put("::/0"))
+            put("persistent_keepalive_interval", 25)
+        }))
     }
 
     // ---------------------------------------------------------------- route
@@ -236,6 +282,8 @@ object SingBoxConfigGenerator {
             put("rules", rules)
             put("final", if (routingMode == RoutingMode.DIRECT) "direct" else "proxy")
             put("auto_detect_interface", true)
+            // Resolves outbound server domains (including the proxy's own host)
+            // without looping back through the tunnel.
             put("default_domain_resolver", JSONObject().apply {
                 put("server", "dns-direct")
             })
@@ -290,13 +338,17 @@ object SingBoxConfigGenerator {
         return when (server.network.lowercase()) {
             "ws", "websocket" -> JSONObject().apply {
                 put("type", "ws")
-                put("path", server.path.ifBlank { "/" })
+                val rawPath = server.path.ifBlank { "/" }
+                // Panels encode early data as `/path?ed=2048`.
+                val edValue = Regex("[?&]ed=(\\d+)").find(rawPath)?.groupValues?.get(1)?.toIntOrNull()
+                put("path", rawPath.substringBefore("?").ifBlank { "/" })
                 put("headers", JSONObject().apply {
                     if (server.host.isNotBlank()) put("Host", server.host)
                 })
-                // 0-RTT support used by most panels.
-                put("max_early_data", 2048)
-                put("early_data_header_name", "Sec-WebSocket-Protocol")
+                if (edValue != null) {
+                    put("max_early_data", edValue)
+                    put("early_data_header_name", "Sec-WebSocket-Protocol")
+                }
             }
             "grpc" -> JSONObject().apply {
                 put("type", "grpc")
@@ -307,7 +359,7 @@ object SingBoxConfigGenerator {
             }
             "httpupgrade" -> JSONObject().apply {
                 put("type", "httpupgrade")
-                put("path", server.path.ifBlank { "/" })
+                put("path", server.path.substringBefore("?").ifBlank { "/" })
                 if (server.host.isNotBlank()) put("host", server.host)
             }
             "http", "h2", "h2c" -> JSONObject().apply {
@@ -324,7 +376,6 @@ object SingBoxConfigGenerator {
 
     private fun createOutboundForServer(server: ServerEntity): JSONObject {
         val out = JSONObject()
-        out.put("tag", "node-out")
         val host = server.server
         val port = server.port
 
@@ -375,9 +426,6 @@ object SingBoxConfigGenerator {
                 out.put("method", server.fingerprint.ifBlank { "chacha20-ietf-poly1305" })
                 out.put("password", server.uuid)
                 out.put("udp_over_tcp", false)
-                out.put("multiplex", JSONObject().apply {
-                    put("enabled", false)
-                })
             }
 
             "hysteria2", "hy2" -> {
@@ -458,16 +506,16 @@ object SingBoxConfigGenerator {
                 out.put("server", host)
                 out.put("server_port", port)
                 out.put("version", "5")
-                if (server.host.isNotBlank()) put2(out, "username", server.host)
-                if (server.uuid.isNotBlank()) put2(out, "password", server.uuid)
+                if (server.host.isNotBlank()) out.put("username", server.host)
+                if (server.uuid.isNotBlank()) out.put("password", server.uuid)
             }
 
             "http", "https" -> {
                 out.put("type", "http")
                 out.put("server", host)
                 out.put("server_port", port)
-                if (server.host.isNotBlank()) put2(out, "username", server.host)
-                if (server.uuid.isNotBlank()) put2(out, "password", server.uuid)
+                if (server.host.isNotBlank()) out.put("username", server.host)
+                if (server.uuid.isNotBlank()) out.put("password", server.uuid)
                 buildTls(server)?.let { out.put("tls", it) }
             }
 
@@ -476,23 +524,14 @@ object SingBoxConfigGenerator {
                 out.put("server", host)
                 out.put("server_port", port)
                 out.put("user", server.host.ifBlank { "root" })
-                out.put("password", server.uuid)
-            }
-
-            "wireguard", "wg" -> {
-                // sing-box 1.11+ models WireGuard as an endpoint, but the
-                // outbound form is still accepted for a single peer.
-                out.put("type", "wireguard")
-                out.put("server", host)
-                out.put("server_port", port)
-                out.put("private_key", server.uuid)
-                out.put("peer_public_key", server.publicKey)
-                if (server.shortId.isNotBlank()) out.put("pre_shared_key", server.shortId)
-                out.put("local_address", JSONArray().apply {
-                    val addr = server.path.ifBlank { "172.16.0.2/32" }
-                    addr.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { put(it) }
-                })
-                out.put("mtu", 1408)
+                val secret = server.uuid.trim()
+                if (secret.startsWith("-----BEGIN")) {
+                    // PEM private key instead of a password.
+                    out.put("private_key", secret)
+                    if (server.shortId.isNotBlank()) out.put("private_key_passphrase", server.shortId)
+                } else if (secret.isNotBlank()) {
+                    out.put("password", secret)
+                }
             }
 
             else -> {
@@ -505,9 +544,5 @@ object SingBoxConfigGenerator {
         }
 
         return out
-    }
-
-    private fun put2(target: JSONObject, key: String, value: String) {
-        target.put(key, value)
     }
 }
