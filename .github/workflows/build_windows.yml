@@ -15,12 +15,13 @@ concurrency:
 
 env:
   SING_BOX_TAG: v1.14.1
-  XRAY_TAG: v25.9.11
+  XRAY_TAG: v26.3.27
   WINTUN_VERSION: 0.14.1
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +87,7 @@ jobs:
           "SING_BOX_RELEASE=$($sb.tag_name)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
           $xr = Get-Release 'XTLS/Xray-core' $env:XRAY_TAG
-          $xrAsset = $xr.assets | Where-Object { $_.name -like "Xray-${{ matrix.xray }}.zip" } | Select-Object -First 1
+          $xrAsset = $xr.assets | Where-Object { $_.name -eq "Xray-${{ matrix.xray }}.zip" } | Select-Object -First 1
           if (-not $xrAsset) { throw "Xray asset for ${{ matrix.xray }} not found in $($xr.tag_name)" }
           Save-Asset $xrAsset.browser_download_url xr.zip
           Expand-Archive xr.zip -DestinationPath xr -Force
