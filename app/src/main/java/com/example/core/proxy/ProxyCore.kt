@@ -28,10 +28,19 @@ class UnsupportedConfigException(message: String) : Exception(message)
 /**
  * An outbound knows how to open a tunnelled connection to (host, port)
  * through one configured server.
+ *
+ * Outbounds are [Closeable] so the service can drop every resource of the
+ * previous profile when the user switches config. The default implementation
+ * is a no-op for stateless outbounds; stateful ones (session caches, QUIC or
+ * multiplexed links) should override it.
  */
-interface Outbound {
+interface Outbound : Closeable {
     val label: String
     fun connect(destHost: String, destPort: Int, timeoutMs: Int = 15000): ProxyConnection
+
+    override fun close() {
+        // Stateless by default.
+    }
 }
 
 object OutboundFactory {
@@ -48,7 +57,7 @@ object OutboundFactory {
 
         if (security == "reality") {
             throw UnsupportedConfigException(
-                "REALITY (pbk/sid) requires the native xray/sing-box core and cannot run on the built-in Kotlin core. Use a TLS or plain config."
+                "REALITY (pbk/sid) needs the native Xray or sing-box core, which is not usable in this build. Rebuild the app with the core libraries, or use a TLS config."
             )
         }
 
@@ -58,13 +67,15 @@ object OutboundFactory {
             "trojan" -> TrojanOutbound(server, vpnService)
             "shadowsocks", "ss" -> ShadowsocksOutbound(server, vpnService)
             "hysteria2", "hy2", "hysteria" ->
-                throw UnsupportedConfigException("Hysteria2 runs over QUIC and needs the native core. Not supported by the built-in core.")
+                throw UnsupportedConfigException("Hysteria runs over QUIC and needs the native sing-box core.")
             "tuic" ->
-                throw UnsupportedConfigException("TUIC runs over QUIC and needs the native core.")
+                throw UnsupportedConfigException("TUIC runs over QUIC and needs the native sing-box core.")
+            "anytls", "shadowtls" ->
+                throw UnsupportedConfigException("${protocol.uppercase()} needs the native sing-box core.")
             "wireguard", "wg" ->
-                throw UnsupportedConfigException("WireGuard needs a kernel/native implementation.")
+                throw UnsupportedConfigException("WireGuard needs the native sing-box core.")
             "ssh" ->
-                throw UnsupportedConfigException("SSH tunnelling needs an SSH library and is not enabled in this build.")
+                throw UnsupportedConfigException("SSH tunnelling needs the native sing-box core.")
             else -> throw UnsupportedConfigException("Unknown protocol: ${server.protocol}")
         }
     }
