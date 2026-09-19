@@ -64,6 +64,18 @@ jobs:
       - name: Report bundled cores
         run: ls -lh app/libs || echo "no native cores bundled; app falls back to the built-in Kotlin core"
 
+      - name: Ensure debug.keystore exists
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            if [ -f "debug.keystore.base64" ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+              echo "Restored debug.keystore from base64"
+            else
+              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+              echo "Generated new debug.keystore"
+            fi
+          fi
+
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
