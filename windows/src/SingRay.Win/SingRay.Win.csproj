@@ -40,6 +40,15 @@
     <AssemblyTitle>SingRay</AssemblyTitle>
   </PropertyGroup>
 
+  <!-- WPF and WinForms are both referenced (WinForms only for the tray icon),
+       so these type names exist twice. Pin them to the WPF versions globally
+       instead of fully qualifying every call site. -->
+  <ItemGroup>
+    <Using Include="System.Windows.Application" Alias="Application" />
+    <Using Include="System.Windows.MessageBox" Alias="MessageBox" />
+    <Using Include="System.Windows.Clipboard" Alias="Clipboard" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- Native cores are copied next to the exe by CI (see workflow). -->
     <None Include="cores\**\*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('cores')" />
