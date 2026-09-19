@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms> <!-- only for the tray icon -->
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SingRay</AssemblyName>
+    <RootNamespace>SingRay</RootNamespace>
+    <ApplicationIcon Condition="Exists('Assets\app.ico')">Assets\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Windows 10 1809+ / Windows 11, x64 + x86 + arm64 -->
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RuntimeIdentifiers>win-x64;win-x86;win-arm64</RuntimeIdentifiers>
+
+    <!-- Source protection: single self-contained binary, no PDBs shipped. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- ReadyToRun cannot be cross-compiled for arm64 from an x64 runner. -->
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != 'win-arm64'">true</PublishReadyToRun>
+    <PublishReadyToRunComposite>false</PublishReadyToRunComposite>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Deterministic>true</Deterministic>
+
+    <Version>1.0.0</Version>
+    <Company>SingRay</Company>
+    <Product>SingRay</Product>
+    <AssemblyTitle>SingRay</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Native cores are copied next to the exe by CI (see workflow). -->
+    <None Include="cores\**\*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('cores')" />
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets')" />
+  </ItemGroup>
+
+</Project>
