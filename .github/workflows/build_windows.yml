@@ -13,6 +13,11 @@ concurrency:
   group: build-windows-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  SING_BOX_TAG: v1.14.1
+  XRAY_TAG: v25.9.11
+  WINTUN_VERSION: 0.14.1
+
 jobs:
   build:
     runs-on: windows-latest
@@ -44,57 +49,81 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Download sing-box and Xray cores
-        continue-on-error: true
+      - name: Download sing-box, Xray and Wintun
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = 'Continue'
+          $ErrorActionPreference = 'Stop'
           $cores = "windows/src/SingRay.Win/cores"
           New-Item -ItemType Directory -Force -Path $cores | Out-Null
           $headers = @{ 'User-Agent' = 'SingRay-CI'; 'Authorization' = "Bearer $env:GH_TOKEN" }
 
-          try {
-            $sb = Invoke-RestMethod -Headers $headers https://api.github.com/repos/SagerNet/sing-box/releases/latest
-            $sbAsset = $sb.assets | Where-Object { $_.name -like "*${{ matrix.singbox }}.zip" } | Select-Object -First 1
-            if ($sbAsset) {
-              Invoke-WebRequest -Headers $headers -Uri $sbAsset.browser_download_url -OutFile sb.zip
-              Expand-Archive sb.zip -DestinationPath sb -Force
-              Get-ChildItem sb -Recurse -Filter sing-box.exe | Select-Object -First 1 | ForEach-Object {
-                Copy-Item $_.FullName "$cores/sing-box.exe" -Force
-              }
-            } else {
-              Write-Warning "sing-box asset for ${{ matrix.singbox }} not found"
+          function Get-Release($repo, $tag) {
+            # Prefer the pinned tag so builds are reproducible; fall back to the
+            # latest release if the tag was ever retracted or renamed.
+            try   { return Invoke-RestMethod -Headers $headers "https://api.github.com/repos/$repo/releases/tags/$tag" }
+            catch { Write-Warning "$repo $tag unavailable, falling back to latest"
+                    return Invoke-RestMethod -Headers $headers "https://api.github.com/repos/$repo/releases/latest" }
+          }
+
+          function Save-Asset($url, $out) {
+            for ($i = 1; $i -le 3; $i++) {
+              try { Invoke-WebRequest -Headers $headers -Uri $url -OutFile $out; return }
+              catch { Write-Warning "attempt $i failed for $url"; Start-Sleep -Seconds (5 * $i) }
             }
-          } catch { Write-Warning "sing-box download failed: $_" }
+            throw "could not download $url"
+          }
 
-          try {
-            $xr = Invoke-RestMethod -Headers $headers https://api.github.com/repos/XTLS/Xray-core/releases/latest
-            $xrAsset = $xr.assets | Where-Object { $_.name -like "Xray-${{ matrix.xray }}.zip" } | Select-Object -First 1
-            if ($xrAsset) {
-              Invoke-WebRequest -Headers $headers -Uri $xrAsset.browser_download_url -OutFile xr.zip
-              Expand-Archive xr.zip -DestinationPath xr -Force
-              Get-ChildItem xr -Recurse -Filter xray.exe | Select-Object -First 1 | ForEach-Object {
-                Copy-Item $_.FullName "$cores/xray.exe" -Force
-              }
-              Get-ChildItem xr -Recurse -Include geoip.dat,geosite.dat | ForEach-Object {
-                Copy-Item $_.FullName "$cores/" -Force
-              }
-            } else {
-              Write-Warning "Xray asset for ${{ matrix.xray }} not found"
-            }
-          } catch { Write-Warning "Xray download failed: $_" }
+          $sb = Get-Release 'SagerNet/sing-box' $env:SING_BOX_TAG
+          $sbAsset = $sb.assets | Where-Object { $_.name -like "*${{ matrix.singbox }}.zip" } | Select-Object -First 1
+          if (-not $sbAsset) { throw "sing-box asset for ${{ matrix.singbox }} not found in $($sb.tag_name)" }
+          Save-Asset $sbAsset.browser_download_url sb.zip
+          Expand-Archive sb.zip -DestinationPath sb -Force
+          Get-ChildItem sb -Recurse -Filter sing-box.exe | Select-Object -First 1 | ForEach-Object {
+            Copy-Item $_.FullName "$cores/sing-box.exe" -Force
+          }
+          "SING_BOX_RELEASE=$($sb.tag_name)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-          try {
-            Invoke-WebRequest -Uri https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
-            Expand-Archive wintun.zip -DestinationPath wt -Force
-            $want = "${{ matrix.wintun }}"
-            $dll = Get-ChildItem wt -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match $want } | Select-Object -First 1
-            if ($dll) { Copy-Item $dll.FullName "$cores/wintun.dll" -Force }
-          } catch { Write-Warning "Wintun download skipped: $_" }
+          $xr = Get-Release 'XTLS/Xray-core' $env:XRAY_TAG
+          $xrAsset = $xr.assets | Where-Object { $_.name -like "Xray-${{ matrix.xray }}.zip" } | Select-Object -First 1
+          if (-not $xrAsset) { throw "Xray asset for ${{ matrix.xray }} not found in $($xr.tag_name)" }
+          Save-Asset $xrAsset.browser_download_url xr.zip
+          Expand-Archive xr.zip -DestinationPath xr -Force
+          Get-ChildItem xr -Recurse -Filter xray.exe | Select-Object -First 1 | ForEach-Object {
+            Copy-Item $_.FullName "$cores/xray.exe" -Force
+          }
+          Get-ChildItem xr -Recurse -Include geoip.dat,geosite.dat | ForEach-Object {
+            Copy-Item $_.FullName "$cores/" -Force
+          }
+          "XRAY_RELEASE=$($xr.tag_name)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-          Get-ChildItem $cores -ErrorAction SilentlyContinue
+          # Wintun is required for TUN mode (system-wide routing).
+          Save-Asset "https://www.wintun.net/builds/wintun-$($env:WINTUN_VERSION).zip" wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wt -Force
+          $want = "${{ matrix.wintun }}"
+          $dll = Get-ChildItem wt -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match $want } | Select-Object -First 1
+          if (-not $dll) { throw "wintun.dll for $want not found" }
+          Copy-Item $dll.FullName "$cores/wintun.dll" -Force
+
+          Get-ChildItem $cores
+
+      # A client without cores cannot run a single protocol, so this must be a
+      # hard failure rather than a warning buried in the log.
+      - name: Verify bundled cores
+        shell: pwsh
+        run: |
+          $cores = "windows/src/SingRay.Win/cores"
+          $required = @('sing-box.exe', 'xray.exe', 'geoip.dat', 'geosite.dat', 'wintun.dll')
+          $missing = $required | Where-Object { -not (Test-Path "$cores/$_") -or (Get-Item "$cores/$_").Length -eq 0 }
+          "### Bundled cores (${{ matrix.arch }})" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "- sing-box $env:SING_BOX_RELEASE" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "- Xray $env:XRAY_RELEASE" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "- Wintun $env:WINTUN_VERSION" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($missing) {
+            Write-Error "Missing cores: $($missing -join ', ')"
+            exit 1
+          }
 
       - name: Publish (self-contained, single file, no symbols)
         shell: pwsh
@@ -107,6 +136,18 @@ jobs:
             -p:DebugType=none -p:DebugSymbols=false `
             -p:SatelliteResourceLanguages=en `
             -o publish/${{ matrix.arch }}
+
+      - name: Verify published output
+        shell: pwsh
+        run: |
+          $exe = "publish/${{ matrix.arch }}/SingRay.exe"
+          if (-not (Test-Path $exe)) { Write-Error "SingRay.exe was not produced"; exit 1 }
+          foreach ($f in @('sing-box.exe', 'xray.exe', 'wintun.dll')) {
+            if (-not (Test-Path "publish/${{ matrix.arch }}/cores/$f")) {
+              Write-Error "cores/$f was not copied next to SingRay.exe"
+              exit 1
+            }
+          }
 
       - name: Strip any leftover symbol files
         shell: pwsh
