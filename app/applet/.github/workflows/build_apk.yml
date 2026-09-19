@@ -1,0 +1,86 @@
+name: Build APK (with native cores)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # ------------------------------------------------------------------
+      # Native cores. The Go cores ship as .aar files and are >90MB,
+      # so they are not committed to git. CI downloads verified prebuilt
+      # binaries here so the final APK bundles both native sing-box and Xray cores.
+      # ------------------------------------------------------------------
+      - name: Fetch libbox.aar (sing-box core)
+        run: |
+          mkdir -p app/libs
+          if [ -f "app/libs/libbox.aar" ] && [ $(wc -c < "app/libs/libbox.aar") -gt 10000000 ]; then
+            echo "libbox.aar already present"
+          else
+            echo "Downloading prebuilt libbox.aar (sing-box 1.14.x)..."
+            curl -fL --retry 5 --retry-delay 5 \
+              "https://github.com/Leadaxe/sing-box-lx/releases/download/v1.14.1-lx.8/libbox-1.14.1-lx.8.aar" \
+              -o app/libs/libbox.aar
+          fi
+          test -s app/libs/libbox.aar
+          echo "Verified libbox.aar ($(ls -lh app/libs/libbox.aar | awk '{print $5}'))"
+
+      - name: Fetch libXray.aar (Xray-core)
+        run: |
+          mkdir -p app/libs
+          if [ -f "app/libs/libXray.aar" ] && [ $(wc -c < "app/libs/libXray.aar") -gt 10000000 ]; then
+            echo "libXray.aar already present"
+          else
+            echo "Downloading prebuilt libXray.aar (Xray v26.x)..."
+            curl -fL --retry 5 --retry-delay 5 \
+              "https://github.com/XTLS/libXray/releases/download/v26.9.9/libxray-android.zip" \
+              -o /tmp/libxray.zip
+            unzip -q -o /tmp/libxray.zip -d /tmp/xray_out/
+            find /tmp/xray_out/ -name "libXray.aar" -exec cp {} app/libs/libXray.aar \;
+            rm -rf /tmp/libxray.zip /tmp/xray_out
+          fi
+          test -s app/libs/libXray.aar
+          echo "Verified libXray.aar ($(ls -lh app/libs/libXray.aar | awk '{print $5}'))"
+
+      - name: Report bundled cores
+        run: ls -lh app/libs
+
+      - name: Ensure debug.keystore exists
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            if [ -f "debug.keystore.base64" ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+              echo "Restored debug.keystore from base64"
+            else
+              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+              echo "Generated new debug.keystore"
+            fi
+          fi
+
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: singray-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
