@@ -9,10 +9,19 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
-import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
-import com.example.R
+import android.os.ParcelFileDescriptor
+import com.example.core.LocalProxyServer
+import com.example.core.engine.CoreManager
+import com.example.core.engine.CoreType
+import com.example.core.engine.SingBoxEngine
+import com.example.core.proxy.ConnectivityTester
+import com.example.core.proxy.Outbound
+import com.example.core.proxy.OutboundFactory
+import com.example.core.proxy.UnsupportedConfigException
+import com.example.data.SingRayDatabase
+import com.example.data.entity.ServerEntity
 import com.example.model.ConnectionStatus
 import com.example.model.CoreLog
 import com.example.model.TrafficStats
@@ -26,28 +35,46 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
-import kotlin.random.Random
+import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Foreground proxy service.
+ *
+ * It runs a real protocol core (VLESS / VMess / Trojan / Shadowsocks) behind a
+ * local SOCKS5 + HTTP inbound on 127.0.0.1:10808 / :10809 and only reports
+ * CONNECTED after real data has travelled through the tunnel.
+ */
 class SingRayVpnService : VpnService() {
 
-    private var vpnInterface: ParcelFileDescriptor? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
     private var statsJob: Job? = null
-    private var localProxyServer: com.example.core.LocalProxyServer? = null
-    private val proxyRxAccumulator = java.util.concurrent.atomic.AtomicLong(0)
-    private val proxyTxAccumulator = java.util.concurrent.atomic.AtomicLong(0)
+    private var socksServer: LocalProxyServer? = null
+    private var httpServer: LocalProxyServer? = null
+    private val proxyRx = AtomicLong(0)
+    private val proxyTx = AtomicLong(0)
+
+    @Volatile
+    private var activeOutbound: Outbound? = null
+
+    private var tunInterface: ParcelFileDescriptor? = null
+    private var corePreference: CoreType = CoreType.AUTO
 
     companion object {
         const val ACTION_CONNECT = "com.example.singray.CONNECT"
         const val ACTION_DISCONNECT = "com.example.singray.DISCONNECT"
+        const val EXTRA_SERVER_ID = "extra_server_id"
         const val EXTRA_SERVER_NAME = "extra_server_name"
         const val EXTRA_SERVER_HOST = "extra_server_host"
         const val EXTRA_SERVER_PORT = "extra_server_port"
         const val EXTRA_PROTOCOL = "extra_protocol"
         const val EXTRA_ROUTING_MODE = "extra_routing_mode"
         const val EXTRA_BATTERY_SAVER = "extra_battery_saver"
+        const val EXTRA_CORE_TYPE = "extra_core_type"
         const val NOTIFICATION_ID = 1001
         const val CHANNEL_ID = "singray_core_vpn_channel"
+
+        const val SOCKS_PORT = 10808
+        const val HTTP_PORT = 10809
 
         private val _isBatterySaverActive = MutableStateFlow(true)
         val isBatterySaverActive: StateFlow<Boolean> = _isBatterySaverActive.asStateFlow()
@@ -64,15 +91,25 @@ class SingRayVpnService : VpnService() {
         private val _coreLogs = MutableStateFlow<List<CoreLog>>(emptyList())
         val coreLogs: StateFlow<List<CoreLog>> = _coreLogs.asStateFlow()
 
+        private val _lastError = MutableStateFlow<String?>(null)
+        val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
+        /** Which core is actually carrying traffic right now. */
+        private val _activeCore = MutableStateFlow(CoreType.BUILT_IN)
+        val activeCore: StateFlow<CoreType> = _activeCore.asStateFlow()
+
         fun log(level: String, tag: String, message: String) {
-            val logEntry = CoreLog(level = level, tag = tag, message = message)
-            val current = _coreLogs.value.takeLast(199).toMutableList()
-            current.add(logEntry)
+            val current = _coreLogs.value.takeLast(299).toMutableList()
+            current.add(CoreLog(level = level, tag = tag, message = message))
             _coreLogs.value = current
         }
 
         fun clearLogs() {
             _coreLogs.value = emptyList()
+        }
+
+        fun clearError() {
+            _lastError.value = null
         }
     }
 
@@ -84,209 +121,264 @@ class SingRayVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CONNECT -> {
-                val name = intent.getStringExtra(EXTRA_SERVER_NAME) ?: "Selected Node"
-                val host = intent.getStringExtra(EXTRA_SERVER_HOST) ?: "127.0.0.1"
-                val port = intent.getIntExtra(EXTRA_SERVER_PORT, 443)
-                val protocol = intent.getStringExtra(EXTRA_PROTOCOL) ?: "VLESS"
-                val routing = intent.getStringExtra(EXTRA_ROUTING_MODE) ?: "Rule"
+                val serverId = intent.getLongExtra(EXTRA_SERVER_ID, -1L)
                 val batterySaver = intent.getBooleanExtra(EXTRA_BATTERY_SAVER, true)
+                val routing = intent.getStringExtra(EXTRA_ROUTING_MODE) ?: "Rule"
+                val preference = runCatching {
+                    CoreType.valueOf(intent.getStringExtra(EXTRA_CORE_TYPE) ?: CoreType.AUTO.name)
+                }.getOrDefault(CoreType.AUTO)
                 _isBatterySaverActive.value = batterySaver
-
-                connectVpn(name, host, port, protocol, routing, batterySaver)
+                corePreference = preference
+                connect(serverId, routing, batterySaver)
             }
-            ACTION_DISCONNECT -> {
-                disconnectVpn()
-            }
+            ACTION_DISCONNECT -> disconnect()
         }
         return START_NOT_STICKY
     }
 
-    private fun connectVpn(
-        serverName: String,
-        host: String,
-        port: Int,
-        protocol: String,
-        routingMode: String,
-        batterySaver: Boolean
-    ) {
+    private fun connect(serverId: Long, routingMode: String, batterySaver: Boolean) {
+        _lastError.value = null
         _connectionStatus.value = ConnectionStatus.CONNECTING
-        _activeServerInfo.value = "[$protocol] $serverName"
-        log("INFO", "CORE", "Starting SingRay core engine ($protocol) [Power Profile: ${if (batterySaver) "Eco Battery" else "Performance"}]...")
-        log("INFO", "TUN", "Allocating virtual TUN interface (172.19.0.1/30)...")
 
-        val initialNotification = buildNotification("Connecting to $serverName...", "Handshaking...")
+        val initial = buildNotification("Connecting...", "Starting core")
         if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(
-                NOTIFICATION_ID,
-                initialNotification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
+            startForeground(NOTIFICATION_ID, initial, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
-            startForeground(NOTIFICATION_ID, initialNotification)
+            startForeground(NOTIFICATION_ID, initial)
         }
 
         serviceScope.launch {
-            try {
-                delay(300) // Fast non-blocking handshake initialization
+            val dao = SingRayDatabase.getDatabase(applicationContext).serverDao()
+            val server: ServerEntity? =
+                if (serverId > 0) dao.getServerById(serverId) else dao.getSelectedServerSync()
 
-                val builder = Builder()
-                    .setSession("SingRay Core [$protocol]")
-                    .addAddress("172.19.0.1", 30)
-                    .addRoute("0.0.0.0", 0)
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("8.8.8.8")
-                    .setMtu(1500)
-
-                try {
-                    builder.addDisallowedApplication(packageName)
-                } catch (_: Exception) {}
-
-                // Protect socket / bypass routing if needed
-                try {
-                    vpnInterface = builder.establish()
-                } catch (e: Exception) {
-                    log("WARN", "TUN", "Direct TUN allocate exception (${e.message}), fallback to userspace core.")
-                }
-
-                if (vpnInterface == null) {
-                    log("WARN", "TUN", "Virtual TUN userspace proxy active.")
-                } else {
-                    log("INFO", "TUN", "Native TUN interface established successfully fd=${vpnInterface?.fd}.")
-                    // Drain and service virtual TUN buffer non-blocking to prevent socket stall
-                    serviceScope.launch(Dispatchers.IO) {
-                        val pfd = vpnInterface ?: return@launch
-                        val inputStream = java.io.FileInputStream(pfd.fileDescriptor)
-                        val buffer = ByteArray(32768)
-                        try {
-                            while (isActive && _connectionStatus.value == ConnectionStatus.CONNECTED) {
-                                val length = inputStream.read(buffer)
-                                if (length <= 0) {
-                                    delay(50)
-                                }
-                            }
-                        } catch (_: Exception) {}
-                    }
-                }
-
-                _connectionStatus.value = ConnectionStatus.CONNECTED
-                log("INFO", "CORE", "Tunnel established. Outbound: $host:$port ($protocol).")
-                log("INFO", "ROUTE", "Routing mode: $routingMode (Hiddify architecture).")
-
-                // Start local SOCKS5 inbound proxy (127.0.0.1:10808) for Telegram and system apps
-                try {
-                    localProxyServer?.stop()
-                    localProxyServer = com.example.core.LocalProxyServer(this@SingRayVpnService, 10808) { rx, tx ->
-                        proxyRxAccumulator.addAndGet(rx)
-                        proxyTxAccumulator.addAndGet(tx)
-                    }
-                    localProxyServer?.start()
-                    log("INFO", "INBOUND", "Local SOCKS5 proxy active on 127.0.0.1:10808 (Telegram ready).")
-                } catch (e: Exception) {
-                    log("WARN", "INBOUND", "Local SOCKS5 init notice: ${e.message}")
-                }
-
-                startTrafficMonitoring(serverName, protocol, batterySaver)
-            } catch (e: Exception) {
-                log("ERROR", "CORE", "Exception during VPN init: ${e.message}")
-                disconnectVpn()
+            if (server == null) {
+                fail("No server selected. Add or select a config first.")
+                return@launch
             }
+
+            _activeServerInfo.value = "[${server.protocol.uppercase()}] ${server.name}"
+            log("INFO", "CORE", "Starting core for ${server.name} (${server.protocol}/${server.network}/${server.security})")
+
+            // ---------------------------------------------------------------
+            // 0. Native cores first: sing-box / Xray, auto-selected per config.
+            // ---------------------------------------------------------------
+            val chosen = CoreManager.pickCore(server, corePreference)
+            if (chosen == CoreType.SING_BOX || chosen == CoreType.XRAY) {
+                // sing-box can own the TUN itself; Xray needs the local proxy.
+                val fd: Int? = if (chosen == CoreType.SING_BOX && SingBoxEngine.isAvailable()) {
+                    establishTun()
+                } else null
+
+                val started = CoreManager.start(
+                    context = applicationContext,
+                    vpnService = this@SingRayVpnService,
+                    server = server,
+                    preference = corePreference,
+                    routingMode = when (routingMode.lowercase()) {
+                        "global proxy", "global" -> com.example.model.RoutingMode.GLOBAL
+                        "direct bypass", "direct" -> com.example.model.RoutingMode.DIRECT
+                        else -> com.example.model.RoutingMode.RULE
+                    },
+                    bypassLan = true,
+                    bypassDomestic = true,
+                    dnsServer = "1.1.1.1",
+                    socksPort = SOCKS_PORT,
+                    httpPort = HTTP_PORT,
+                    tunFd = fd
+                )
+
+                if (started.success) {
+                    _activeCore.value = started.core
+                    log("INFO", "CORE", "${started.core.title} is now handling traffic")
+
+                    // Verify through the core's own SOCKS inbound.
+                    val ok = ConnectivityTester.socksProbe("127.0.0.1", SOCKS_PORT)
+                    if (!ok.success) {
+                        fail("${started.core.title} started but the tunnel does not pass data: ${ok.message}")
+                        return@launch
+                    }
+                    log("INFO", "TEST", "Tunnel verified through ${started.core.title} in ${ok.latencyMs} ms")
+                    _connectionStatus.value = ConnectionStatus.CONNECTED
+                    _trafficStats.value = TrafficStats(currentLatencyMs = ok.latencyMs)
+                    startTrafficMonitoring(server.name, batterySaver, ok.latencyMs)
+                    return@launch
+                }
+
+                closeTun()
+                log("WARN", "CORE", started.message)
+            }
+
+            _activeCore.value = CoreType.BUILT_IN
+            log("INFO", "CORE", "Using the built-in Kotlin core")
+
+            // 1. Build the real outbound. Unsupported configs fail loudly here.
+            val outbound = try {
+                OutboundFactory.create(server, this@SingRayVpnService)
+            } catch (e: UnsupportedConfigException) {
+                fail(e.message ?: "Unsupported config")
+                return@launch
+            } catch (e: Exception) {
+                fail("Failed to build outbound: ${e.message}")
+                return@launch
+            }
+            activeOutbound = outbound
+
+            // 2. Verify the tunnel really works before claiming CONNECTED.
+            log("INFO", "TEST", "Verifying tunnel with a real HTTP request...")
+            val probe = ConnectivityTester.realDelay(server, this@SingRayVpnService)
+            if (!probe.success) {
+                fail("Handshake failed: ${probe.message}")
+                return@launch
+            }
+            log("INFO", "TEST", "Tunnel verified in ${probe.latencyMs} ms -> ${probe.message}")
+
+            // 3. Start local inbounds that actually forward through the outbound.
+            try {
+                socksServer?.stop()
+                httpServer?.stop()
+                socksServer = LocalProxyServer(
+                    vpnService = this@SingRayVpnService,
+                    port = SOCKS_PORT,
+                    outboundProvider = { activeOutbound ?: outbound },
+                    onTraffic = { rx, tx -> proxyRx.addAndGet(rx); proxyTx.addAndGet(tx) },
+                    onError = { msg -> log("WARN", "INBOUND", msg) }
+                ).also { it.start() }
+
+                httpServer = LocalProxyServer(
+                    vpnService = this@SingRayVpnService,
+                    port = HTTP_PORT,
+                    outboundProvider = { activeOutbound ?: outbound },
+                    onTraffic = { rx, tx -> proxyRx.addAndGet(rx); proxyTx.addAndGet(tx) },
+                    onError = { msg -> log("WARN", "INBOUND", msg) }
+                ).also { it.start() }
+            } catch (e: Exception) {
+                fail("Could not start local inbound: ${e.message}")
+                return@launch
+            }
+
+            log("INFO", "INBOUND", "SOCKS5 ready on 127.0.0.1:$SOCKS_PORT")
+            log("INFO", "INBOUND", "HTTP proxy ready on 127.0.0.1:$HTTP_PORT")
+            log("INFO", "ROUTE", "Routing mode: $routingMode")
+
+            _connectionStatus.value = ConnectionStatus.CONNECTED
+            _trafficStats.value = TrafficStats(currentLatencyMs = probe.latencyMs)
+            startTrafficMonitoring(server.name, batterySaver, probe.latencyMs)
         }
     }
 
-    private fun startTrafficMonitoring(serverName: String, protocol: String, batterySaver: Boolean) {
+    private fun fail(message: String) {
+        log("ERROR", "CORE", message)
+        _lastError.value = message
+        _connectionStatus.value = ConnectionStatus.DISCONNECTED
+        _activeServerInfo.value = "Not Connected"
+        stopEverything()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun startTrafficMonitoring(serverName: String, batterySaver: Boolean, latency: Long) {
         statsJob?.cancel()
-        var sessionRxBytes = 0L
-        var sessionTxBytes = 0L
+        var totalRx = 0L
+        var totalTx = 0L
         var seconds = 0L
         val intervalMs = if (batterySaver) 2000L else 1000L
-
-        var lastSysRx = android.net.TrafficStats.getTotalRxBytes()
-        var lastSysTx = android.net.TrafficStats.getTotalTxBytes()
-        if (lastSysRx < 0) lastSysRx = 0L
-        if (lastSysTx < 0) lastSysTx = 0L
 
         statsJob = serviceScope.launch(Dispatchers.IO) {
             while (isActive && _connectionStatus.value == ConnectionStatus.CONNECTED) {
                 delay(intervalMs)
-                seconds += (intervalMs / 1000)
+                seconds += intervalMs / 1000
 
-                // Read hardware network bytes + proxy bytes
-                val currentSysRx = android.net.TrafficStats.getTotalRxBytes()
-                val currentSysTx = android.net.TrafficStats.getTotalTxBytes()
-
-                val proxyRx = proxyRxAccumulator.getAndSet(0L)
-                val proxyTx = proxyTxAccumulator.getAndSet(0L)
-
-                val sysDeltaRx = if (lastSysRx > 0 && currentSysRx >= lastSysRx) currentSysRx - lastSysRx else 0L
-                val sysDeltaTx = if (lastSysTx > 0 && currentSysTx >= lastSysTx) currentSysTx - lastSysTx else 0L
-
-                val deltaRx = sysDeltaRx + proxyRx
-                val deltaTx = sysDeltaTx + proxyTx
-
-                if (currentSysRx > 0) lastSysRx = currentSysRx
-                if (currentSysTx > 0) lastSysTx = currentSysTx
-
-                val speedDown = (deltaRx * 1000) / intervalMs
-                val speedUp = (deltaTx * 1000) / intervalMs
-
-                sessionRxBytes += deltaRx
-                sessionTxBytes += deltaTx
+                // Only count bytes that really passed through our tunnel.
+                val deltaRx = proxyRx.getAndSet(0L)
+                val deltaTx = proxyTx.getAndSet(0L)
+                totalRx += deltaRx
+                totalTx += deltaTx
 
                 _trafficStats.value = TrafficStats(
-                    uploadSpeedBytes = speedUp,
-                    downloadSpeedBytes = speedDown,
-                    totalUploadBytes = sessionTxBytes,
-                    totalDownloadBytes = sessionRxBytes,
+                    uploadSpeedBytes = (deltaTx * 1000) / intervalMs,
+                    downloadSpeedBytes = (deltaRx * 1000) / intervalMs,
+                    totalUploadBytes = totalTx,
+                    totalDownloadBytes = totalRx,
                     durationSeconds = seconds,
-                    currentLatencyMs = 0L
+                    currentLatencyMs = latency
                 )
 
-                // Update ongoing notification with real measured speed
-                val speedText = "↓ ${formatSpeed(speedDown)}  ↑ ${formatSpeed(speedUp)} • $serverName"
-                val notification = buildNotification("SingRay: $serverName", speedText)
+                val text = "D " + formatSpeed((deltaRx * 1000) / intervalMs) +
+                    "  U " + formatSpeed((deltaTx * 1000) / intervalMs) + " - " + serverName
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                nm.notify(NOTIFICATION_ID, notification)
+                nm.notify(NOTIFICATION_ID, buildNotification("SingRay: $serverName", text))
             }
         }
     }
 
-    private fun disconnectVpn() {
-        _connectionStatus.value = ConnectionStatus.DISCONNECTING
-        log("INFO", "CORE", "Stopping SingRay core...")
+    /** Creates the TUN interface handed to sing-box (which owns routing). */
+    private fun establishTun(): Int? = try {
+        closeTun()
+        val builder = Builder()
+            .setSession("SingRay")
+            .setMtu(9000)
+            .addAddress("172.19.0.1", 30)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("1.1.1.1")
+            .addDnsServer("8.8.8.8")
+            .setBlocking(false)
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (_: Exception) {
+        }
+        val pfd = builder.establish()
+        tunInterface = pfd
+        pfd?.fd
+    } catch (e: Exception) {
+        log("WARN", "TUN", "Could not establish TUN: ${e.message}")
+        null
+    }
 
+    private fun closeTun() {
+        try { tunInterface?.close() } catch (_: Exception) {}
+        tunInterface = null
+    }
+
+    private fun stopEverything() {
         statsJob?.cancel()
-        try {
-            localProxyServer?.stop()
-        } catch (_: Exception) {}
-        localProxyServer = null
+        try { CoreManager.stop() } catch (_: Exception) {}
+        closeTun()
+        try { socksServer?.stop() } catch (_: Exception) {}
+        try { httpServer?.stop() } catch (_: Exception) {}
+        socksServer = null
+        httpServer = null
+        activeOutbound = null
+        proxyRx.set(0)
+        proxyTx.set(0)
+    }
 
-        try {
-            vpnInterface?.close()
-        } catch (_: Exception) {}
-        vpnInterface = null
-
+    private fun disconnect() {
+        _connectionStatus.value = ConnectionStatus.DISCONNECTING
+        log("INFO", "CORE", "Stopping core...")
+        stopEverything()
         _trafficStats.value = TrafficStats()
         _connectionStatus.value = ConnectionStatus.DISCONNECTED
         _activeServerInfo.value = "Not Connected"
-        log("INFO", "CORE", "Core terminated cleanly.")
-
+        log("INFO", "CORE", "Core stopped.")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
+        stopEverything()
+        _connectionStatus.value = ConnectionStatus.DISCONNECTED
         super.onDestroy()
-        disconnectVpn()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "SingRay VPN Service",
+                "SingRay Core Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Shows real-time connection status and throughput statistics"
+                description = "Connection status and throughput"
                 setShowBadge(false)
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -300,15 +392,11 @@ class SingRayVpnService : VpnService() {
             this, 0, launchIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
-        val disconnectIntent = Intent(this, SingRayVpnService::class.java).apply {
-            action = ACTION_DISCONNECT
-        }
+        val disconnectIntent = Intent(this, SingRayVpnService::class.java).apply { action = ACTION_DISCONNECT }
         val pendingDisconnect = PendingIntent.getService(
             this, 1, disconnectIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(content)
@@ -324,8 +412,8 @@ class SingRayVpnService : VpnService() {
     private fun formatSpeed(bytesPerSec: Long): String {
         val df = DecimalFormat("#.#")
         return when {
-            bytesPerSec >= 1_000_000 -> "${df.format(bytesPerSec / 1_000_000.0)} MB/s"
-            bytesPerSec >= 1_000 -> "${df.format(bytesPerSec / 1_000.0)} KB/s"
+            bytesPerSec >= 1_000_000 -> df.format(bytesPerSec / 1_000_000.0) + " MB/s"
+            bytesPerSec >= 1_000 -> df.format(bytesPerSec / 1_000.0) + " KB/s"
             else -> "$bytesPerSec B/s"
         }
     }

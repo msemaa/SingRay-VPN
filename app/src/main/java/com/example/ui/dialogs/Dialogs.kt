@@ -189,7 +189,7 @@ fun AddSubscriptionDialog(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Subscribe to remote node feeds (Hiddify, V2Ray, Clash, Sing-box)",
+                    text = "Subscribe to remote node feeds (V2Ray, Clash, Sing-box, Base64)",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )

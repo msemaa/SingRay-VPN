@@ -2,6 +2,8 @@ package com.example.core
 
 import android.net.VpnService
 import android.util.Log
+import com.example.core.proxy.Outbound
+import com.example.core.proxy.ProxyConnection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -10,165 +12,253 @@ import kotlinx.coroutines.launch
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 
 /**
- * High-performance lightweight SOCKS5 Inbound proxy server (127.0.0.1:10808)
- * Built to follow Hiddify and v2rayNG inbound architecture.
- * Directly integrates with Telegram, browsers, and Android apps.
+ * Local inbound server.
+ *
+ * Accepts SOCKS5 (and plain HTTP / HTTPS CONNECT on the same port) from local
+ * apps and forwards every stream through the configured proxy outbound
+ * (VLESS / VMess / Trojan / Shadowsocks).
+ *
+ * This is the part that was broken before: the old implementation opened a
+ * direct socket to the destination, so traffic never touched the proxy server.
  */
 class LocalProxyServer(
     private val vpnService: VpnService?,
     private val port: Int = 10808,
-    private val onTraffic: (rx: Long, tx: Long) -> Unit
+    private val outboundProvider: () -> Outbound,
+    private val onTraffic: (rx: Long, tx: Long) -> Unit,
+    private val onError: (String) -> Unit = {}
 ) {
     private var serverSocket: ServerSocket? = null
     private var serverJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(Dispatchers.IO + Job())
 
     fun start() {
         stop()
         serverJob = scope.launch {
             try {
-                serverSocket = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1"))
-                Log.i("LocalProxyServer", "Hiddify-compatible SOCKS5 inbound listening on 127.0.0.1:$port")
+                val ss = ServerSocket(port, 128, InetAddress.getByName("127.0.0.1"))
+                ss.reuseAddress = true
+                serverSocket = ss
+                Log.i(TAG, "Local inbound (SOCKS5 + HTTP) listening on 127.0.0.1:$port")
 
-                while (isActive && serverSocket != null && !serverSocket!!.isClosed) {
+                while (isActive && !ss.isClosed) {
                     try {
-                        val clientSocket = serverSocket!!.accept()
-                        launch(Dispatchers.IO) {
-                            handleClient(clientSocket)
-                        }
+                        val client = ss.accept()
+                        launch { handleClient(client) }
                     } catch (e: Exception) {
-                        if (!isActive) break
+                        if (!isActive || ss.isClosed) break
                     }
                 }
             } catch (e: Exception) {
-                Log.e("LocalProxyServer", "Failed to start SOCKS5 inbound: ${e.message}")
+                onError("Local inbound failed on port $port: ${e.message}")
+                Log.e(TAG, "inbound start failed", e)
             }
         }
     }
 
     private fun handleClient(client: Socket) {
+        var upstream: ProxyConnection? = null
         try {
-            client.soTimeout = 30000
-            val input = client.getInputStream()
+            client.tcpNoDelay = true
+            client.soTimeout = 0
+            val input = client.getInputStream().buffered()
             val output = client.getOutputStream()
 
-            // 1. SOCKS5 Handshake
-            val version = input.read()
-            if (version != 5) {
-                client.close()
+            input.mark(1)
+            val first = input.read()
+            if (first < 0) { client.close(); return }
+            input.reset()
+
+            upstream = if (first == 0x05) {
+                handleSocks5(input, output)
+            } else {
+                handleHttp(input, output)
+            }
+
+            if (upstream == null) {
+                try { client.close() } catch (_: Exception) {}
                 return
             }
-            val numMethods = input.read()
-            val methods = ByteArray(numMethods.coerceAtLeast(1))
-            input.read(methods)
-
-            // Reply: Version 5, Method: No Auth (0x00)
-            output.write(byteArrayOf(5, 0))
-            output.flush()
-
-            // 2. Request Details
-            val reqVer = input.read()
-            val cmd = input.read() // 1 = CONNECT
-            input.read() // RSV
-            val atyp = input.read() // 1 = IPv4, 3 = Domain, 4 = IPv6
-
-            if (cmd != 1) {
-                // Command not supported
-                output.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0))
-                output.flush()
-                client.close()
-                return
-            }
-
-            var targetHost = ""
-            when (atyp) {
-                1 -> { // IPv4
-                    val ip = ByteArray(4)
-                    input.read(ip)
-                    targetHost = InetAddress.getByAddress(ip).hostAddress ?: ""
-                }
-                3 -> { // Domain name
-                    val len = input.read()
-                    val domainBytes = ByteArray(len)
-                    input.read(domainBytes)
-                    targetHost = String(domainBytes)
-                }
-                4 -> { // IPv6
-                    val ip6 = ByteArray(16)
-                    input.read(ip6)
-                    targetHost = InetAddress.getByAddress(ip6).hostAddress ?: ""
-                }
-            }
-
-            val p1 = input.read()
-            val p2 = input.read()
-            val targetPort = (p1 shl 8) or p2
-
-            // Connect to target (with VPN protect so it doesn't loop)
-            val remoteSocket = Socket()
-            vpnService?.protect(remoteSocket)
-            remoteSocket.soTimeout = 30000
-            remoteSocket.connect(InetSocketAddress(targetHost, targetPort), 10000)
-
-            // Send SOCKS5 success reply
-            output.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
-            output.flush()
-
-            // Bi-directional data pipe
-            relayTraffic(client, remoteSocket)
+            relay(client, input, output, upstream)
         } catch (e: Exception) {
+            try { upstream?.close() } catch (_: Exception) {}
             try { client.close() } catch (_: Exception) {}
         }
     }
 
-    private fun relayTraffic(client: Socket, remote: Socket) {
-        val clientIn = client.getInputStream()
-        val clientOut = client.getOutputStream()
-        val remoteIn = remote.getInputStream()
-        val remoteOut = remote.getOutputStream()
+    // ---------------- SOCKS5 ----------------
 
-        val job1 = scope.launch(Dispatchers.IO) {
-            pipeStream(clientIn, remoteOut) { bytes -> onTraffic(0, bytes) }
+    private fun handleSocks5(input: InputStream, output: OutputStream): ProxyConnection? {
+        if (input.read() != 0x05) return null
+        val nMethods = input.read()
+        if (nMethods < 0) return null
+        repeat(nMethods) { input.read() }
+        output.write(byteArrayOf(5, 0)); output.flush()
+
+        input.read() // ver
+        val cmd = input.read()
+        input.read() // rsv
+        val atyp = input.read()
+
+        if (cmd != 0x01) { // only CONNECT; UDP ASSOCIATE is not supported by this core
+            output.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0)); output.flush()
+            return null
         }
 
-        val job2 = scope.launch(Dispatchers.IO) {
-            pipeStream(remoteIn, clientOut) { bytes -> onTraffic(bytes, 0) }
+        val host: String = when (atyp) {
+            0x01 -> {
+                val ip = ByteArray(4); readFull(input, ip)
+                InetAddress.getByAddress(ip).hostAddress ?: return null
+            }
+            0x03 -> {
+                val len = input.read()
+                if (len <= 0) return null
+                val d = ByteArray(len); readFull(input, d)
+                String(d, Charsets.UTF_8)
+            }
+            0x04 -> {
+                val ip = ByteArray(16); readFull(input, ip)
+                InetAddress.getByAddress(ip).hostAddress ?: return null
+            }
+            else -> return null
         }
+        val p = ByteArray(2); readFull(input, p)
+        val destPort = ((p[0].toInt() and 0xFF) shl 8) or (p[1].toInt() and 0xFF)
 
-        scope.launch(Dispatchers.IO) {
-            job1.join()
-            job2.join()
-            try { client.close() } catch (_: Exception) {}
-            try { remote.close() } catch (_: Exception) {}
+        return try {
+            val conn = outboundProvider().connect(host, destPort)
+            output.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)); output.flush()
+            conn
+        } catch (e: Exception) {
+            onError("Tunnel to $host:$destPort failed: ${e.message}")
+            // 0x05 = connection refused by upstream
+            try { output.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); output.flush() } catch (_: Exception) {}
+            null
         }
     }
 
-    private fun pipeStream(input: InputStream, output: OutputStream, onBytes: (Long) -> Unit) {
-        val buffer = ByteArray(16384)
+    // ---------------- HTTP / HTTPS ----------------
+
+    private fun handleHttp(input: InputStream, output: OutputStream): ProxyConnection? {
+        val requestLine = StringBuilder()
+        val headerBlock = StringBuilder()
+        var line = readLine(input) ?: return null
+        requestLine.append(line)
+        while (true) {
+            val h = readLine(input) ?: break
+            if (h.isEmpty()) break
+            headerBlock.append(h).append(CRLF)
+        }
+
+        val parts = requestLine.toString().split(" ")
+        if (parts.size < 2) return null
+        val method = parts[0].uppercase()
+        val target = parts[1]
+
+        return if (method == "CONNECT") {
+            val host = target.substringBeforeLast(":")
+            val destPort = target.substringAfterLast(":").toIntOrNull() ?: 443
+            try {
+                val conn = outboundProvider().connect(host, destPort)
+                output.write(("HTTP/1.1 200 Connection Established" + CRLF + CRLF).toByteArray())
+                output.flush()
+                conn
+            } catch (e: Exception) {
+                onError("Tunnel to $host:$destPort failed: ${e.message}")
+                try {
+                    output.write(("HTTP/1.1 502 Bad Gateway" + CRLF + CRLF).toByteArray()); output.flush()
+                } catch (_: Exception) {}
+                null
+            }
+        } else {
+            // Plain HTTP proxy request: rewrite absolute URI to origin form.
+            val uri = try { java.net.URI(target) } catch (_: Exception) { null } ?: return null
+            val host = uri.host ?: return null
+            val destPort = if (uri.port > 0) uri.port else 80
+            val pathPart = (uri.rawPath ?: "/").ifBlank { "/" } +
+                (uri.rawQuery?.let { "?$it" } ?: "")
+            try {
+                val conn = outboundProvider().connect(host, destPort)
+                val rebuilt = StringBuilder()
+                    .append(method).append(" ").append(pathPart).append(" HTTP/1.1").append(CRLF)
+                    .append(headerBlock)
+                    .append(CRLF)
+                conn.output.write(rebuilt.toString().toByteArray(Charsets.ISO_8859_1))
+                conn.output.flush()
+                conn
+            } catch (e: Exception) {
+                onError("Tunnel to $host:$destPort failed: ${e.message}")
+                null
+            }
+        }
+    }
+
+    // ---------------- relay ----------------
+
+    private fun relay(client: Socket, cIn: InputStream, cOut: OutputStream, upstream: ProxyConnection) {
+        val up = scope.launch {
+            pipe(cIn, upstream.output) { onTraffic(0, it) }
+            try { upstream.socket.shutdownOutput() } catch (_: Exception) {}
+        }
+        val down = scope.launch {
+            pipe(upstream.input, cOut) { onTraffic(it, 0) }
+            try { client.shutdownOutput() } catch (_: Exception) {}
+        }
+        scope.launch {
+            up.join(); down.join()
+            try { client.close() } catch (_: Exception) {}
+            try { upstream.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun pipe(input: InputStream, output: OutputStream, onBytes: (Long) -> Unit) {
+        val buffer = ByteArray(32768)
         try {
-            var read: Int
-            while (input.read(buffer).also { read = it } != -1) {
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
                 output.write(buffer, 0, read)
                 output.flush()
                 onBytes(read.toLong())
             }
         } catch (_: Exception) {
-        } finally {
-            try { output.flush() } catch (_: Exception) {}
+        }
+    }
+
+    private fun readFull(input: InputStream, buf: ByteArray) {
+        var off = 0
+        while (off < buf.size) {
+            val r = input.read(buf, off, buf.size - off)
+            if (r <= 0) throw java.io.EOFException()
+            off += r
+        }
+    }
+
+    private fun readLine(input: InputStream): String? {
+        val sb = StringBuilder()
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (b == 0x0A) return sb.toString().removeSuffix("\u000D")
+            sb.append(b.toChar())
+            if (sb.length > 8192) return sb.toString()
         }
     }
 
     fun stop() {
-        try {
-            serverJob?.cancel()
-            serverSocket?.close()
-        } catch (_: Exception) {}
+        try { serverSocket?.close() } catch (_: Exception) {}
+        try { serverJob?.cancel() } catch (_: Exception) {}
         serverSocket = null
         serverJob = null
+    }
+
+    companion object {
+        private const val TAG = "LocalProxyServer"
+        private const val CRLF = "\u000D\u000A"
     }
 }

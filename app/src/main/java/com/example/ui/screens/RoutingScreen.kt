@@ -33,6 +33,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -91,7 +92,18 @@ fun RoutingScreen(viewModel: MainViewModel) {
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        val cores = listOf("Sing-box", "Xray-core")
+        val activeCore by viewModel.activeCore.collectAsStateWithLifecycle()
+        val installed = remember { viewModel.installedCores() }
+        Text(
+            text = "Active: ${activeCore.title}  |  Installed: " +
+                installed.entries.joinToString(", ") { "${it.key.title} ${it.value}" },
+            color = AppTheme.colors.textMuted,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        val cores = listOf("Auto", "Sing-box", "Xray", "Built-in")
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -114,7 +126,7 @@ fun RoutingScreen(viewModel: MainViewModel) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = if (engine == "Sing-box") Icons.Default.Memory else Icons.Default.Router,
+                                imageVector = if (engine == "Sing-box" || engine == "Auto") Icons.Default.Memory else Icons.Default.Router,
                                 contentDescription = engine,
                                 tint = if (isSelected) AppTheme.colors.accentCyan else AppTheme.colors.textMuted,
                                 modifier = Modifier.size(18.dp)

@@ -249,12 +249,17 @@ object ConfigParser {
         if (query.isBlank()) return emptyMap()
         val result = mutableMapOf<String, String>()
         for (param in query.split("&")) {
-            val parts = param.split("=")
-            if (parts.size == 2) {
-                val key = URLDecoder.decode(parts[0], StandardCharsets.UTF_8.name())
-                val value = URLDecoder.decode(parts[1], StandardCharsets.UTF_8.name())
-                result[key] = value
-            }
+            if (param.isBlank()) continue
+            val parts = param.split("=", limit = 2)
+            val key = try {
+                URLDecoder.decode(parts[0], StandardCharsets.UTF_8.name())
+            } catch (_: Exception) { parts[0] }
+            val value = if (parts.size == 2) {
+                try {
+                    URLDecoder.decode(parts[1], StandardCharsets.UTF_8.name())
+                } catch (_: Exception) { parts[1] }
+            } else ""
+            if (key.isNotBlank()) result[key] = value
         }
         return result
     }

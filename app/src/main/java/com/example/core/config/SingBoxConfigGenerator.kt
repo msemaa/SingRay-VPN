@@ -129,6 +129,130 @@ object SingBoxConfigGenerator {
         return root.toString(2)
     }
 
+    /**
+     * Runtime config actually handed to the native sing-box core.
+     *
+     * Unlike [generateSingBoxJson] (which is the pretty preview shown in the UI)
+     * this always exposes a mixed SOCKS/HTTP inbound on localhost, and adds the
+     * tun inbound only when the VpnService established a TUN interface.
+     */
+    fun generateRuntimeJson(
+        server: ServerEntity,
+        routingMode: RoutingMode = RoutingMode.RULE,
+        bypassLan: Boolean = true,
+        bypassIran: Boolean = true,
+        dnsServer: String = "1.1.1.1",
+        socksPort: Int = 10808,
+        httpPort: Int = 10809,
+        useTun: Boolean = false,
+        mtu: Int = 9000
+    ): String {
+        val root = JSONObject()
+
+        root.put("log", JSONObject().apply {
+            put("disabled", false)
+            put("level", "warn")
+            put("timestamp", true)
+        })
+
+        root.put("dns", JSONObject().apply {
+            put("servers", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("tag", "dns-remote")
+                    put("address", "https://$dnsServer/dns-query")
+                    put("detour", "proxy")
+                })
+                put(JSONObject().apply {
+                    put("tag", "dns-direct")
+                    put("address", "udp://8.8.8.8")
+                    put("detour", "direct")
+                })
+            })
+            put("strategy", "prefer_ipv4")
+            put("independent_cache", true)
+        })
+
+        val inbounds = JSONArray()
+        inbounds.put(JSONObject().apply {
+            put("type", "mixed")
+            put("tag", "mixed-in")
+            put("listen", "127.0.0.1")
+            put("listen_port", socksPort)
+            put("sniff", true)
+            put("sniff_override_destination", false)
+        })
+        inbounds.put(JSONObject().apply {
+            put("type", "http")
+            put("tag", "http-in")
+            put("listen", "127.0.0.1")
+            put("listen_port", httpPort)
+            put("sniff", true)
+        })
+        if (useTun) {
+            inbounds.put(JSONObject().apply {
+                put("type", "tun")
+                put("tag", "tun-in")
+                put("interface_name", "singray-tun")
+                put("address", JSONArray().put("172.19.0.1/30"))
+                put("mtu", mtu)
+                put("auto_route", true)
+                put("strict_route", false)
+                put("stack", "mixed")
+                put("sniff", true)
+            })
+        }
+        root.put("inbounds", inbounds)
+
+        val nodeOutbound = createOutboundForServer(server).apply { put("tag", "proxy") }
+        val outbounds = JSONArray()
+            .put(nodeOutbound)
+            .put(JSONObject().apply {
+                put("type", "direct")
+                put("tag", "direct")
+            })
+            .put(JSONObject().apply {
+                put("type", "block")
+                put("tag", "block")
+            })
+            .put(JSONObject().apply {
+                put("type", "dns")
+                put("tag", "dns-out")
+            })
+        root.put("outbounds", outbounds)
+
+        val rules = JSONArray()
+        rules.put(JSONObject().apply {
+            put("protocol", "dns")
+            put("outbound", "dns-out")
+        })
+        when (routingMode) {
+            RoutingMode.GLOBAL -> rules.put(JSONObject().apply { put("outbound", "proxy") })
+            RoutingMode.DIRECT -> rules.put(JSONObject().apply { put("outbound", "direct") })
+            RoutingMode.RULE -> {
+                if (bypassLan) {
+                    rules.put(JSONObject().apply {
+                        put("ip_is_private", true)
+                        put("outbound", "direct")
+                    })
+                }
+                if (bypassIran) {
+                    rules.put(JSONObject().apply {
+                        put("geoip", JSONArray().put("ir"))
+                        put("outbound", "direct")
+                    })
+                }
+                rules.put(JSONObject().apply { put("outbound", "proxy") })
+            }
+        }
+        root.put("route", JSONObject().apply {
+            put("rules", rules)
+            put("final", if (routingMode == RoutingMode.DIRECT) "direct" else "proxy")
+            put("auto_detect_interface", true)
+        })
+
+        return root.toString()
+    }
+
     private fun createOutboundForServer(server: ServerEntity): JSONObject {
         val out = JSONObject()
         val tag = "node-out"

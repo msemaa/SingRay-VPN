@@ -479,10 +479,32 @@ fun ServersScreen(
                 modifier = Modifier.background(AppTheme.colors.surface)
             ) {
                 DropdownMenuItem(
-                    text = { Text("Import from Clipboard / Text", color = AppTheme.colors.textPrimary) },
+                    text = { Text("Import from Clipboard", color = AppTheme.colors.textPrimary) },
                     onClick = {
                         showFabMenu = false
-                        showImportDialog = true
+                        // Auto-paste: read the clipboard immediately and import it.
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clipText = clipboard.primaryClip
+                            ?.takeIf { it.itemCount > 0 }
+                            ?.getItemAt(0)
+                            ?.coerceToText(context)
+                            ?.toString()
+                            ?.trim()
+                            .orEmpty()
+
+                        if (clipText.isBlank()) {
+                            Toast.makeText(context, "کلیپ‌بورد خالی است - متن کانفیگ را وارد کنید", Toast.LENGTH_SHORT).show()
+                            showImportDialog = true
+                        } else {
+                            val found = com.example.core.parser.ConfigParser.parseContent(clipText).size
+                            if (found > 0) {
+                                viewModel.importConfigText(clipText)
+                                Toast.makeText(context, "$found کانفیگ از کلیپ‌بورد اضافه شد", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "کانفیگ معتبری در کلیپ‌بورد نبود", Toast.LENGTH_SHORT).show()
+                                showImportDialog = true
+                            }
+                        }
                     }
                 )
                 DropdownMenuItem(

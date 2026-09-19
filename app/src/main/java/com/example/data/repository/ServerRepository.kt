@@ -113,6 +113,11 @@ class ServerRepository(private val context: Context) {
         return ping
     }
 
+    /** Stores the result of a real end-to-end tunnel test. */
+    suspend fun setRealDelay(serverId: Long, latencyMs: Long) {
+        serverDao.updatePing(serverId, latencyMs, System.currentTimeMillis())
+    }
+
     suspend fun testAllPings(
         servers: List<ServerEntity>,
         onProgress: (current: Int, total: Int) -> Unit = { _, _ -> }

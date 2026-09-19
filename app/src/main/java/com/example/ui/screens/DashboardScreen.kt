@@ -512,7 +512,7 @@ fun DashboardScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Quick 1-Click Telegram Proxy Enabler (Hiddify-compatible SOCKS5 Inbound)
+        // Quick 1-Click Telegram Proxy Enabler (local SOCKS5 inbound)
         if (isConnected) {
             Card(
                 shape = RoundedCornerShape(12.dp),
@@ -558,7 +558,7 @@ fun DashboardScreen(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "اتصال فوری تلگرام (پروکسی Hiddify)",
+                                text = "اتصال فوری تلگرام (پروکسی داخلی برنامه)",
                                 color = Color.White,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
@@ -876,7 +876,7 @@ fun DashboardScreen(
                 if (allSubscriptions.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Subscription Scope Selector (Hiddify style sub-scoped auto switch)
+                    // Subscription Scope Selector (sub-scoped auto switch)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,

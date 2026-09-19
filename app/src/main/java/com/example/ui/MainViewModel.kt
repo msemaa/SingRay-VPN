@@ -47,6 +47,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val trafficStats: StateFlow<TrafficStats> = SingRayVpnService.trafficStats
     val activeServerInfo: StateFlow<String?> = SingRayVpnService.activeServerInfo
     val coreLogs: StateFlow<List<CoreLog>> = SingRayVpnService.coreLogs
+    val lastError: StateFlow<String?> = SingRayVpnService.lastError
 
     // Smart routing / Auto-best-ping toggle
     private val _smartPingEnabled = MutableStateFlow(false)
@@ -69,7 +70,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _dnsServer = MutableStateFlow("1.1.1.1")
     val dnsServer: StateFlow<String> = _dnsServer.asStateFlow()
 
-    private val _coreType = MutableStateFlow("Sing-box")
+    // Core preference: Auto / Sing-box / Xray / Built-in
+    private val _corePreference = MutableStateFlow(com.example.core.engine.CoreType.AUTO)
+    val corePreference: StateFlow<com.example.core.engine.CoreType> = _corePreference.asStateFlow()
+
+    /** Core actually carrying traffic right now. */
+    val activeCore: StateFlow<com.example.core.engine.CoreType> = SingRayVpnService.activeCore
+
+    /** Cores bundled in this build, with their native versions. */
+    fun installedCores(): Map<com.example.core.engine.CoreType, String> =
+        com.example.core.engine.CoreManager.versions()
+
+    private val _coreType = MutableStateFlow("Auto")
     val coreType: StateFlow<String> = _coreType.asStateFlow()
 
     // Diagnostic tool state
@@ -202,6 +214,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCoreType(type: String) {
         _coreType.value = type
+        _corePreference.value = when (type.lowercase().replace("-", "").replace(" ", "")) {
+            "singbox" -> com.example.core.engine.CoreType.SING_BOX
+            "xray" -> com.example.core.engine.CoreType.XRAY
+            "builtin", "kotlin" -> com.example.core.engine.CoreType.BUILT_IN
+            else -> com.example.core.engine.CoreType.AUTO
+        }
+        SingRayVpnService.log("INFO", "CORE", "Core preference: ${_corePreference.value.title}")
+    }
+
+    fun setCorePreference(core: com.example.core.engine.CoreType) {
+        _corePreference.value = core
+        _coreType.value = core.title
+        SingRayVpnService.log("INFO", "CORE", "Core preference: ${core.title}")
     }
 
     fun selectServer(server: ServerEntity) {
@@ -271,6 +296,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val ping = repository.testServerPing(server)
             SingRayVpnService.log("INFO", "PING", "${server.name} latency: ${if (ping > 0) "$ping ms" else "Timeout"}")
+        }
+    }
+
+    /**
+     * Real delay: opens the actual proxy tunnel and performs a genuine HTTP
+     * request through it. A green TCP ping no longer means "working".
+     */
+    fun realDelayTest(server: ServerEntity) {
+        viewModelScope.launch {
+            _uiNotice.value = "تست واقعی ${server.name}..."
+            val result = com.example.core.proxy.ConnectivityTester.realDelay(server, null)
+            if (result.success) {
+                repository.setRealDelay(server.id, result.latencyMs)
+                _uiNotice.value = "${server.name}: سالم (${result.latencyMs} ms)"
+                SingRayVpnService.log("INFO", "REAL-DELAY", "${server.name} OK in ${result.latencyMs} ms")
+            } else {
+                repository.setRealDelay(server.id, -2L)
+                _uiNotice.value = "${server.name}: ناموفق - ${result.message}"
+                SingRayVpnService.log("ERROR", "REAL-DELAY", "${server.name} failed: ${result.message}")
+            }
+        }
+    }
+
+    /** Real end-to-end test for every node, then pick the fastest working one. */
+    fun realDelayTestAll() {
+        val servers = allServers.value
+        if (servers.isEmpty() || _batchPingState.value.isTesting) return
+        viewModelScope.launch {
+            _batchPingState.value = BatchPingState(isTesting = true, current = 0, total = servers.size)
+            var done = 0
+            var working = 0
+            for (s in servers) {
+                val r = com.example.core.proxy.ConnectivityTester.realDelay(s, null, timeoutMs = 8000)
+                repository.setRealDelay(s.id, if (r.success) r.latencyMs else -2L)
+                if (r.success) working++
+                done++
+                _batchPingState.value = BatchPingState(isTesting = true, current = done, total = servers.size)
+            }
+            _batchPingState.value = BatchPingState(isTesting = false, current = done, total = servers.size)
+            _uiNotice.value = "تست واقعی تمام شد: $working از ${servers.size} نود سالم"
         }
     }
 
@@ -349,12 +414,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val intent = Intent(context, SingRayVpnService::class.java).apply {
             action = SingRayVpnService.ACTION_CONNECT
+            putExtra(SingRayVpnService.EXTRA_SERVER_ID, server.id)
             putExtra(SingRayVpnService.EXTRA_SERVER_NAME, server.name)
             putExtra(SingRayVpnService.EXTRA_SERVER_HOST, server.server)
             putExtra(SingRayVpnService.EXTRA_SERVER_PORT, server.port)
             putExtra(SingRayVpnService.EXTRA_PROTOCOL, server.protocol.uppercase())
             putExtra(SingRayVpnService.EXTRA_ROUTING_MODE, _routingMode.value.title)
             putExtra(SingRayVpnService.EXTRA_BATTERY_SAVER, _batterySaverEnabled.value)
+            putExtra(SingRayVpnService.EXTRA_CORE_TYPE, _corePreference.value.name)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             context.startForegroundService(intent)

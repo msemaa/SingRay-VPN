@@ -76,6 +76,11 @@ googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.W
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
+  // Native cores: drop libbox.aar (sing-box) and/or libXray.aar / libv2ray.aar
+  // into app/libs/. See app/libs/README.md. The app also works without them
+  // by falling back to the built-in Kotlin core.
+  implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
+
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
