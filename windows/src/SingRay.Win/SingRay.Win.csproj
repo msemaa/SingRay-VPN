@@ -49,10 +49,25 @@
     <Using Include="System.Windows.Clipboard" Alias="Clipboard" />
   </ItemGroup>
 
+  <!-- Native cores are placed here by CI before publish (see the workflow).
+       sing-box.exe / xray.exe are launched as child processes by path, so they
+       must stay real files on disk next to SingRay.exe. Without
+       ExcludeFromSingleFile they would be bundled inside the single-file host
+       and publish/<arch>/cores would come out empty. The glob simply matches
+       nothing when the folder is absent, so no condition is needed. -->
   <ItemGroup>
-    <!-- Native cores are copied next to the exe by CI (see workflow). -->
-    <None Include="cores\**\*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('cores')" />
-    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets')" />
+    <Content Include="cores\**\*">
+      <Link>cores\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Assets\**\*">
+      <Link>Assets\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
 
 </Project>
