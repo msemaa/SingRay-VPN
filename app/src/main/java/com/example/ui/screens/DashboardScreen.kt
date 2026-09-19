@@ -73,6 +73,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -91,6 +92,45 @@ import com.example.ui.dialogs.TELEGRAM_CHANNEL_URL
 import com.example.ui.dialogs.ViewSingBoxJsonDialog
 import com.example.ui.theme.AppTheme
 import java.text.DecimalFormat
+
+/**
+ * A fixed-size square action used by the dashboard header.
+ *
+ * Deliberately built from Box + clickable instead of IconButton: IconButton
+ * applies `minimumInteractiveComponentSize()` (48dp) on top of whatever size
+ * you pass, so a row of "36dp" IconButtons silently needs 144dp+ and starts
+ * overlapping its neighbours. Here the measured size is exactly [size].
+ */
+@Composable
+private fun HeaderActionButton(
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color,
+    background: Color,
+    borderColor: Color,
+    testTag: String,
+    size: Int = 34,
+    iconSize: Int = 17,
+    onClick: () -> Unit
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(size.dp)
+            .clip(CircleShape)
+            .background(background)
+            .border(1.dp, borderColor, CircleShape)
+            .clickable(onClick = onClick)
+            .testTag(testTag)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(iconSize.dp)
+        )
+    }
+}
 
 @Composable
 fun DashboardScreen(
@@ -148,15 +188,16 @@ fun DashboardScreen(
 
         // Engineering Top Bar Status
         //
-        // LAYOUT RULE (see docs/PROGRESS_LOG.md): the text side must take
-        // weight(1f) and the action side must wrapContentWidth(), otherwise the
-        // header buttons overlap on narrow screens or with large system fonts.
+        // LAYOUT RULE: the title column takes weight(1f) and truncates, and the
+        // action side is a FIXED number of fixed-size square buttons. Never use
+        // wrapContentWidth() here (it lets the row overflow instead of shrinking,
+        // which is what made these controls overlap) and never put a
+        // variable-length label in this row.
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f, fill = false)) {
+            Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "SINGRAY",
@@ -166,9 +207,10 @@ fun DashboardScreen(
                         letterSpacing = 1.5.sp,
                         fontFamily = FontFamily.Monospace,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(4.dp))
@@ -187,8 +229,10 @@ fun DashboardScreen(
                         )
                     }
                 }
+                // The routing mode lives here, on the subtitle line, so a long
+                // label can never push the header buttons into each other.
                 Text(
-                    text = "Xray / Sing-box • Multi-Protocol Engine",
+                    text = "Xray / Sing-box • ${routingMode.title}",
                     color = AppTheme.colors.textSecondary,
                     fontSize = 11.sp,
                     maxLines = 1,
@@ -198,14 +242,19 @@ fun DashboardScreen(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            // Top action buttons: Telegram Channel, theme switcher, routing pill.
+            // Top actions: Telegram channel, theme switch, routing screen.
+            // Three fixed 34dp targets + 2 gaps = a constant 118dp.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.wrapContentWidth()
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Telegram quick button
-                IconButton(
+                HeaderActionButton(
+                    icon = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Telegram channel",
+                    tint = Color(0xFF229ED9),
+                    background = Color(0xFF229ED9).copy(alpha = 0.15f),
+                    borderColor = Color(0xFF229ED9).copy(alpha = 0.4f),
+                    testTag = "telegram_top_button",
                     onClick = {
                         try {
                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(TELEGRAM_CHANNEL_URL))
@@ -213,69 +262,30 @@ fun DashboardScreen(
                         } catch (_: Exception) {
                             viewModel.openTelegramDialog()
                         }
-                    },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF229ED9).copy(alpha = 0.15f))
-                        .border(1.dp, Color(0xFF229ED9).copy(alpha = 0.4f), CircleShape)
-                        .testTag("telegram_top_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Mirovex Telegram",
-                        tint = Color(0xFF229ED9),
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-
-                // Theme Mode Switcher
-                IconButton(
-                    onClick = { viewModel.toggleDarkTheme() },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(AppTheme.colors.surfaceVariant)
-                        .border(1.dp, AppTheme.colors.border, CircleShape)
-                        .testTag("theme_toggle_button")
-                ) {
-                    Icon(
-                        imageVector = if (isDarkTheme) Icons.Default.Brightness7 else Icons.Default.Brightness4,
-                        contentDescription = "Toggle Theme",
-                        tint = AppTheme.colors.accentCyan,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Route Mode Pill
-                Box(
-                    modifier = Modifier
-                        .widthIn(max = 118.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(AppTheme.colors.surface)
-                        .border(1.dp, AppTheme.colors.border, RoundedCornerShape(20.dp))
-                        .clickable { onNavigateToRouting() }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .testTag("routing_mode_pill")
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Routing",
-                            tint = AppTheme.colors.accentCyan,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = routingMode.title,
-                            color = AppTheme.colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
                     }
-                }
+                )
+
+                HeaderActionButton(
+                    icon = if (isDarkTheme) Icons.Default.Brightness7 else Icons.Default.Brightness4,
+                    contentDescription = "Toggle theme",
+                    tint = AppTheme.colors.accentCyan,
+                    background = AppTheme.colors.surfaceVariant,
+                    borderColor = AppTheme.colors.border,
+                    testTag = "theme_toggle_button",
+                    iconSize = 18,
+                    onClick = { viewModel.toggleDarkTheme() }
+                )
+
+                HeaderActionButton(
+                    icon = Icons.Default.Tune,
+                    contentDescription = "Routing mode: ${routingMode.title}",
+                    tint = AppTheme.colors.accentCyan,
+                    background = AppTheme.colors.surface,
+                    borderColor = AppTheme.colors.border,
+                    testTag = "routing_mode_pill",
+                    iconSize = 16,
+                    onClick = { onNavigateToRouting() }
+                )
             }
         }
 
