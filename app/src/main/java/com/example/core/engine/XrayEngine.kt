@@ -4,27 +4,31 @@ import android.content.Context
 import android.net.VpnService
 import com.example.data.entity.ServerEntity
 import com.example.service.SingRayVpnService
-import libXray.DialerController
-import libXray.LibXray
 import org.json.JSONObject
 import java.io.File
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
 
 /**
  * Native Xray-core engine (libXray.aar, package libXray).
  *
- * IMPORTANT (see docs/AGENT_HANDOFF.md):
- * The Java classes of libXray can be present on the classpath while the matching
- * gomobile shared object (libgojni.so) is missing or built for another ABI. In
- * that case the very first call crashes with:
+ * The whole bridge is bound through reflection on purpose:
  *
- *   java.lang.UnsatisfiedLinkError: No implementation found for
- *   void libXray.LibXray._init() (tried Java_libXray_LibXray__1init ...)
+ *  1. libXray.aar is an OPTIONAL core. sing-box already speaks every protocol
+ *     this app offers, and bundling both AARs is fragile because each gomobile
+ *     build ships its own copy of the gomobile runtime (`go/Seq`) and of
+ *     libgojni.so. With reflection the app still compiles and runs when
+ *     app/libs/libXray.aar is absent - Xray is simply reported as unavailable.
+ *  2. Even when the Java classes are on the classpath, the matching shared
+ *     object can be missing or built for another ABI, and the first call dies
+ *     with:
  *
- * Previously isAvailable() returned a hardcoded `true`, so CoreManager kept
- * routing every profile to a core that could never start, and the connection
- * ended up on the limited Kotlin fallback. We now probe the bridge exactly once
- * and cache the verdict, so an unusable Xray is transparently skipped and
- * sing-box takes over.
+ *       java.lang.UnsatisfiedLinkError: No implementation found for
+ *       void libXray.LibXray._init() (tried Java_libXray_LibXray__1init ...)
+ *
+ *     We probe the bridge exactly once, cache the verdict and let CoreManager
+ *     fall back to sing-box instead of routing traffic to a core that can
+ *     never start.
  */
 object XrayEngine : CoreEngine {
 
@@ -42,8 +46,32 @@ object XrayEngine : CoreEngine {
     @Volatile
     private var unavailableReason: String? = null
 
+    @Volatile
+    private var libXrayClass: Class<*>? = null
+
+    private fun libXray(): Class<*> =
+        libXrayClass ?: Class.forName("libXray.LibXray").also { libXrayClass = it }
+
+    /** Reflection hides the real cause inside InvocationTargetException. */
+    private fun unwrap(e: Throwable): Throwable =
+        (e as? InvocationTargetException)?.targetException ?: e
+
     /** Raw invoke that never throws checked wrappers; used by the probe too. */
-    private fun invoke(payload: JSONObject): String = LibXray.invoke(payload.toString())
+    private fun invoke(payload: JSONObject): String = try {
+        libXray()
+            .getMethod("invoke", String::class.java)
+            .invoke(null, payload.toString()) as String
+    } catch (e: Throwable) {
+        throw unwrap(e)
+    }
+
+    private fun describe(e: Throwable): String = when (e) {
+        is ClassNotFoundException ->
+            "libXray.aar is not bundled in this build"
+        is UnsatisfiedLinkError ->
+            "libXray native library missing for this ABI (${e.message ?: "no detail"})"
+        else -> "${e.javaClass.simpleName}: ${e.message ?: "no detail"}"
+    }
 
     private fun probeBridge(): Boolean {
         if (probed) return bridgeReady
@@ -51,7 +79,7 @@ object XrayEngine : CoreEngine {
             if (probed) return bridgeReady
             bridgeReady = try {
                 // 1) Java side present?
-                Class.forName("libXray.LibXray")
+                libXray()
                 // 2) Native side actually linked? Any gomobile call triggers _init().
                 val resp = invoke(JSONObject().apply {
                     put("apiVersion", 3)
@@ -59,9 +87,9 @@ object XrayEngine : CoreEngine {
                 })
                 resp.isNotBlank()
             } catch (e: Throwable) {
-                unavailableReason = "${e.javaClass.simpleName}: ${e.message ?: "no detail"}"
+                unavailableReason = describe(e)
                 SingRayVpnService.log(
-                    "WARN", "XRAY",
+                    "INFO", "XRAY",
                     "Native Xray bridge is not usable ($unavailableReason). " +
                         "Xray will be skipped automatically and sing-box will carry the traffic."
                 )
@@ -101,6 +129,35 @@ object XrayEngine : CoreEngine {
         else -> false
     }
 
+    /**
+     * Without socket protection every packet Xray sends would be routed back
+     * into our own TUN device, so a failure here has to abort the start.
+     */
+    private fun registerSocketProtection(vpnService: VpnService) {
+        val controllerClass = Class.forName("libXray.DialerController")
+        val controller = Proxy.newProxyInstance(
+            controllerClass.classLoader,
+            arrayOf(controllerClass)
+        ) { proxy, method, args ->
+            when (method.name) {
+                "protectFd" -> vpnService.protect((args?.get(0) as Number).toInt())
+                "equals" -> proxy === args?.get(0)
+                "hashCode" -> System.identityHashCode(proxy)
+                "toString" -> "SingRayDialerController"
+                else -> null
+            }
+        }
+        libXray().getMethod("registerDialerController", controllerClass)
+            .invoke(null, controller)
+        // Newer libXray builds also protect inbound listeners; older ones do not
+        // expose the helper at all, which is not fatal.
+        try {
+            libXray().getMethod("registerListenerController", controllerClass)
+                .invoke(null, controller)
+        } catch (_: NoSuchMethodException) {
+        }
+    }
+
     override fun start(
         context: Context,
         vpnService: VpnService?,
@@ -112,7 +169,7 @@ object XrayEngine : CoreEngine {
             return CoreStartResult(
                 false,
                 type,
-                "Xray native library is not bundled in this build (${unavailableReason ?: "missing libgojni.so"})"
+                "Xray core unavailable (${unavailableReason ?: "libXray.aar not bundled"})"
             )
         }
         return try {
@@ -132,19 +189,14 @@ object XrayEngine : CoreEngine {
 
             if (vpnService != null) {
                 try {
-                    val controller = object : DialerController {
-                        override fun protectFd(fd: Long): Boolean = vpnService.protect(fd.toInt())
-                    }
-                    LibXray.registerDialerController(controller)
-                    LibXray.registerListenerController(controller)
+                    registerSocketProtection(vpnService)
                 } catch (e: Throwable) {
-                    // Older/newer libXray builds renamed these helpers. Losing socket
-                    // protection would loop traffic back into the tunnel, so bail out
-                    // instead of starting a broken tunnel.
+                    val cause = unwrap(e)
                     return CoreStartResult(
                         false,
                         type,
-                        "Xray socket protection unavailable (${e.javaClass.simpleName}) - refusing to start to avoid a routing loop"
+                        "Xray socket protection unavailable (${cause.javaClass.simpleName}) - " +
+                            "refusing to start to avoid a routing loop"
                     )
                 }
             }
@@ -169,8 +221,8 @@ object XrayEngine : CoreEngine {
             SingRayVpnService.log("INFO", "XRAY", "Started ($ver)")
             CoreStartResult(true, type, "Xray started ($ver)")
         } catch (e: Throwable) {
-            val cause = e.cause?.message ?: e.message ?: e.javaClass.simpleName
-            CoreStartResult(false, type, "Xray failed: $cause")
+            val cause = unwrap(e)
+            CoreStartResult(false, type, "Xray failed: ${cause.message ?: cause.javaClass.simpleName}")
         }
     }
 
