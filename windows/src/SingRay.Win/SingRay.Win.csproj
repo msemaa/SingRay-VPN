@@ -2,7 +2,11 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- The platform version must be part of the TFM, otherwise the SDK
+         infers TargetPlatformVersion 7.0 and rejects SupportedOSPlatformVersion. -->
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms> <!-- only for the tray icon -->
     <Nullable>enable</Nullable>
@@ -14,7 +18,6 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
     <!-- Windows 10 1809+ / Windows 11, x64 + x86 + arm64 -->
-    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
     <RuntimeIdentifiers>win-x64;win-x86;win-arm64</RuntimeIdentifiers>
 
     <!-- Source protection: single self-contained binary, no PDBs shipped. -->
