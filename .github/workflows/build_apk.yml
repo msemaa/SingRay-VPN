@@ -24,8 +24,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # ------------------------------------------------------------------
-      # Native cores. The Go cores ship as .aar files (>90MB),
-      # so they are downloaded here by CI so the resulting APK bundles both cores.
+      # Native cores. Download prebuilt official AAR binaries
       # ------------------------------------------------------------------
       - name: Fetch libbox.aar (sing-box core)
         run: |
